@@ -12,11 +12,17 @@
 //!    `build` instead, through [`Canvas::opened`].
 //! 2. egui-baseview converts mouse events with the zoom the previous frame ran at.
 //! 3. egui-baseview's window size drifts with each zoom change.
-//! 4. The first editor window in a process misses the host's display scale.
+//! 4. egui's scale can differ from the host's: the first editor window in a process misses the
+//!    host's display scale on Windows, and on Linux Reaper doesn't scale its windows by the display
+//!    scale egui reads.
+//!
+//! It logs what it measures and every zoom and size it asks for through nice-plug's logger, so
+//! `NICE_LOG` set to a file path shows how an editor settled in a host.
 
 use std::sync::Arc;
 
 use egui::{Event, Id, Pos2, Rect, Sense, Ui, Vec2, ViewportCommand, pos2, vec2};
+use nice_plug::debug::nice_log;
 
 use crate::Colour;
 use crate::night::{COLOUR_BAR_HEIGHT, MUTED, PANEL};
@@ -86,6 +92,7 @@ impl Canvas {
         self.missed_scale = 1.0;
         self.opening = Some(0);
         self.settling = false;
+        self.corrected = None;
         self.grip = None;
     }
 
@@ -101,6 +108,10 @@ impl Canvas {
         // so rounding drifts (bug 3). In the frame a new zoom takes effect, pin the window to
         // exactly the canvas at it.
         if zoom.to_bits() != self.last_zoom.to_bits() {
+            nice_log!(
+                "family-ui: zoom {} took effect, pinning the window to the canvas",
+                zoom
+            );
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size));
             self.settling = false;
         }
@@ -111,6 +122,11 @@ impl Canvas {
             && self.corrected != Some(points)
         {
             self.corrected = Some(points);
+            nice_log!(
+                "family-ui: window is {:?} points, not the canvas's {:?}; asking for the canvas's",
+                points,
+                self.size
+            );
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size));
         }
 
@@ -130,12 +146,12 @@ impl Canvas {
     /// One frame of measuring the host's scale on opening, `frames` in, with the window `points`
     /// in size at `zoom`.
     ///
-    /// The host sizes the window with its display scale, but egui-baseview reports a scale of 1 for
-    /// the first window in a process (bug 4), so egui sees it that much too big in points. That
-    /// ratio is the scale it missed. The zoom is that times the user's scale, which the plugin
-    /// keeps itself: nice-plug-egui's own saved zoom would count the missed scale twice.
+    /// The host sizes the window with its display scale, but egui's scale can differ from it (bug
+    /// 4), so egui sees the window that much too big or too small in points. That ratio is the
+    /// scale it missed. The zoom is that times the user's scale, which the plugin keeps itself:
+    /// nice-plug-egui's own saved zoom would count the missed scale twice.
     fn measure(&mut self, ctx: &egui::Context, points: Vec2, zoom: f32, frames: u32) {
-        let measured = missed_scale(points, self.size);
+        let measured = missed_scale(points, zoom, self.size);
         if measured.is_none() && frames < OPENING_FRAMES {
             self.opening = Some(frames + 1);
             return;
@@ -143,6 +159,15 @@ impl Canvas {
         self.opening = None;
         self.missed_scale = measured.unwrap_or(1.0);
         let target = self.missed_scale * self.scale.get();
+        nice_log!(
+            "family-ui: opened at {:?} points and zoom {} after {} frames; missed scale {:?}, \
+             zoom {}",
+            points,
+            zoom,
+            frames,
+            measured,
+            target
+        );
         if (target - zoom).abs() > 1e-3 {
             ctx.set_zoom_factor(target);
             self.settling = true;
@@ -200,6 +225,7 @@ impl Canvas {
             if caught_up {
                 self.scale.set(new_zoom / self.missed_scale);
                 if (new_zoom - zoom).abs() > 1e-3 {
+                    nice_log!("family-ui: grip sets zoom {}", new_zoom);
                     ctx.set_zoom_factor(new_zoom);
                     self.zoom_set_at = now;
                 }
@@ -222,12 +248,15 @@ impl Canvas {
     }
 }
 
-/// The host's display scale egui missed, from a window `points` in size in egui's points showing a
-/// canvas of `size`: their ratio, if the window has the canvas's shape. `None` while it doesn't,
-/// such as while a host shows a placeholder.
-fn missed_scale(points: Vec2, size: Vec2) -> Option<f32> {
+/// The host's display scale egui missed, from a window `points` in size in egui's points at `zoom`
+/// showing a canvas of `size`: the ratio of the window at a zoom of 1 to the canvas, if the window
+/// has the canvas's shape. `None` while it doesn't, such as while a host shows a placeholder.
+///
+/// nice-plug-egui opens each window at the zoom the last one closed at, so the zoom on opening
+/// isn't always 1.
+fn missed_scale(points: Vec2, zoom: f32, size: Vec2) -> Option<f32> {
     let same_shape = (points.y / points.x - size.y / size.x).abs() < 0.01;
-    same_shape.then(|| points.x / size.x)
+    same_shape.then(|| points.x * zoom / size.x)
 }
 
 /// How much a grip drag of `drag` pixels scales a canvas of `size` points shown at `zoom`: by the
@@ -247,14 +276,25 @@ mod tests {
 
     #[test]
     fn a_window_of_the_canvas_shape_gives_the_missed_scale() {
-        let measured = missed_scale(SIZE * 1.5, SIZE).expect("same shape");
+        let measured = missed_scale(SIZE * 1.5, 1.0, SIZE).expect("same shape");
 
         assert!((measured - 1.5).abs() < 1e-6);
     }
 
     #[test]
+    fn a_window_opened_at_the_last_zoom_gives_the_same_missed_scale() {
+        // Reaper on Linux: egui's scale is 1.6458 but the window stays 720×420 pixels. The first
+        // window opens at a zoom of 1; nice-plug-egui opens the next at the zoom it settled on.
+        let first = missed_scale(SIZE / 1.645_833_4, 1.0, SIZE).expect("same shape");
+        let next = missed_scale(SIZE, first, SIZE).expect("same shape");
+
+        assert!((first - 0.607_595_5).abs() < 1e-6);
+        assert!((next - first).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_window_of_another_shape_gives_no_scale() {
-        assert_eq!(missed_scale(vec2(10_000.0, 10_000.0), SIZE), None);
+        assert_eq!(missed_scale(vec2(10_000.0, 10_000.0), 1.0, SIZE), None);
     }
 
     #[test]
