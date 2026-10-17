@@ -40,3 +40,6 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+# Line tables only: backtraces through dependencies keep their file and line, without the size
+# and memory of full debug info (nobody steps into dependencies with a debugger).
+debug = "line-tables-only"
