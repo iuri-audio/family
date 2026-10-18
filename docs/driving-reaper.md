@@ -5,8 +5,8 @@ When a bug only shows in a host (the editor, automation, transport, latency, sta
 ## Steps
 
 1. **Install the build under test** with Reaper closed, as the plugin's README says under *Installing* for your platform. The plugin folders are shared with the developer's own Reaper, so when you've finished, reinstall the build they expect.
-2. **Write a script that turns the bug into a number.** It sets up what the bug needs through the [ReaScript API](https://www.reaper.fm/sdk/reascript/reascripthelp.html) (tracks, FX, playback, automation, project changes), repeats the suspect step, and writes what it observed to `$OUT`. Start from [`reaper/editor-cycles.lua`](reaper/editor-cycles.lua), which opens and closes an editor N times. The script is done when a failing run and a passing run produce different output, such as "drew 26 of 30".
-3. **Run it** with your platform's launcher (below): `<launcher> <out-dir> <script.lua> KEY=VALUE...`. Each `KEY=VALUE` reaches the script as an environment variable, beside `OUT` and `NICE_LOG`.
+2. **Write a script that turns the bug into a number.** It sets up what the bug needs through the [ReaScript API](https://www.reaper.fm/sdk/reascript/reascripthelp.html) (tracks, FX, playback, automation, project changes), repeats the suspect step, and writes what it observed to `$OUT`. Start from [`reaper/editor-cycles.lua`](reaper/editor-cycles.lua), which opens and closes an editor N times, or [`reaper/touch.lua`](reaper/touch.lua), which checks that gestures in touch mode let go. The script is done when a failing run and a passing run produce different output, such as "drew 26 of 30".
+3. **Run it** with your platform's launcher (below): `<launcher> <out-dir> <script.lua> KEY=VALUE...`. Each `KEY=VALUE` reaches the script as an environment variable, beside `OUT`, `NICE_LOG` and `PRELUDE`. Give each run a new `<out-dir>`: the launcher refuses one that holds an earlier run's results.
 4. **Read the results**: the script's own files in `<out-dir>`, the plugin's log in `<out-dir>/nice.log` (family-ui logs each editor opening and how it settled), and Reaper's output in `<out-dir>/reaper.stdout`.
 
 ## Launchers
@@ -18,9 +18,14 @@ A launcher runs Reaper on a scratch copy of the developer's configuration (setti
 
 ## The script's contract
 
-- **Quit on its own, without a prompt.** End with the `quit` in `editor-cycles.lua`: it opens an empty project with `noprompt:` and then quits. Quitting a changed project otherwise opens a save dialog, and someone has to click it.
+- **Load [`reaper/prelude.lua`](reaper/prelude.lua)** with `local drive = dofile(os.getenv("PRELUDE"))` and use what it gives: `drive.start(fn)` waits until Reaper can play (playback started in its first seconds stops at once at 0 s); `drive.say(...)` writes a line to `$OUT/result.txt`; `drive.quit()` quits with nothing to save, since quitting a changed project opens a save dialog that someone has to click.
 - **Keep files under `$OUT` or the script's folder.** The Flatpak Reaper runs sandboxed, and its launcher only shares those two (and the home folder).
 - **Time with `reaper.defer`,** never by blocking. Reaper only draws and handles windows between deferred calls.
+- **Check that a device change reached Reaper** with `reaper.GetAudioDeviceInfo("SRATE")` and `("BSIZE")`. On Linux, PipeWire's `pw-metadata` settings don't reach it (its JACK client keeps the block size it asked for, and the Deck allows only 48 kHz), so changing the sample rate or block size takes the developer in Reaper's Preferences.
+
+## Checks that need the developer
+
+Where only a person can act (mouse gestures on a plugin's editor) or see (a lamp, a glitch), the script does everything else and prompts them with `reaper.MB` at the moment to act or watch, then reads the result itself; `reaper.MB(question, title, 4)` asks Yes/No. Before the run, explain in plain words what the check is about (what touch automation is, what "latched" means), since the developer may not know the host's terms. In the run, nothing plays or moves before the first prompt, and each prompt says what to do and what to watch for, then starts on OK.
 
 ## Runs worth trusting
 

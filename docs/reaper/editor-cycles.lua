@@ -1,36 +1,23 @@
 -- Opens and closes a plugin's editor CYCLES times, writes what happened to $OUT/result.txt,
 -- then quits Reaper. An example of a driving script: see ../driving-reaper.md.
 --
--- Environment (passed with flatpak run --env=...):
+-- Environment (KEY=VALUE arguments to the launcher):
 --   PLUGIN  the FX to load, as Reaper names it, e.g. "VST3:Doubler" or "CLAP:Doubler"
---   OUT     a folder for results, readable by the agent
 --   CYCLES  how many times to open and close the editor (default 20)
 
-local OUT = os.getenv("OUT")
 local PLUGIN = os.getenv("PLUGIN")
 local CYCLES = tonumber(os.getenv("CYCLES") or "20")
 local OPEN_S, CLOSED_S = 1.0, 0.4
 
-local result = io.open(OUT .. "/result.txt", "w")
-
--- Replace the project with an empty one, so quitting has nothing to save and never prompts.
-local function quit()
-  result:close()
-  local empty = OUT .. "/empty.rpp"
-  local file = io.open(empty, "w")
-  file:write('<REAPER_PROJECT 0.1 "7.0" 0\n>\n')
-  file:close()
-  reaper.Main_openProject("noprompt:" .. empty)
-  reaper.Main_OnCommand(40004, 0) -- File: Quit REAPER
-end
+local drive = dofile(os.getenv("PRELUDE"))
 
 reaper.InsertTrackAtIndex(0, false)
 local track = reaper.GetTrack(0, 0)
 local fx = reaper.TrackFX_AddByName(track, PLUGIN, false, -1)
-result:write("fx ", fx, "\n")
+drive.say("fx ", fx)
 if fx < 0 then
-  result:write("error: ", PLUGIN, " did not load\n")
-  quit()
+  drive.say("error: ", PLUGIN, " did not load")
+  drive.quit()
   return
 end
 
@@ -41,8 +28,8 @@ local function step()
       reaper.TrackFX_Show(track, fx, 2) -- hide the floating window
       open, next_at = false, reaper.time_precise() + CLOSED_S
       if cycle >= CYCLES then
-        result:write("cycles ", cycle, "\n")
-        quit()
+        drive.say("cycles ", cycle)
+        drive.quit()
         return
       end
     else
@@ -53,4 +40,4 @@ local function step()
   end
   reaper.defer(step)
 end
-step()
+drive.start(step)
