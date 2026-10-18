@@ -10,6 +10,8 @@
 //! inside it (such as the value) itself.
 
 use std::f32::consts::PI;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::epaint::Mesh;
 use egui::{Event, Id, MouseWheelUnit, Rect, Response, Sense, Shape, Ui, vec2};
@@ -34,6 +36,14 @@ const FINE_WHEEL_STEP: f32 = 0.01;
 
 /// How many points of smooth (trackpad) scrolling make one wheel notch.
 const POINTS_PER_NOTCH: f32 = 50.0;
+
+/// Seconds to let the host apply a change after input ends. A refused change, or a touch-mode
+/// return between frames, must not leave the arc stuck on the requested value.
+const HOST_GRACE_SECONDS: f64 = 0.1;
+
+/// Keep nearby wheel notches in one gesture. A same-frame begin/value/end can leave Reaper's
+/// touch envelope recording only its old value, so let the host observe the edit before ending it.
+const WHEEL_IDLE_SECONDS: f64 = 0.15;
 
 /// Where the arc starts, at the minimum: bottom left, in radians clockwise from the right on a
 /// screen whose y axis points down.
@@ -82,29 +92,36 @@ pub const fn angle(value: f32) -> f32 {
 /// Both of nice-plug's wrappers only apply a change once the host has taken it (CLAP always, VST3
 /// while the plugin is processing), so for a moment the parameter still reads its old value. Until
 /// it moves off that value, the dial builds on what it sent instead, so quick drag moves and wheel
-/// notches aren't lost.
+/// notches aren't lost. Retire it when the host moves the parameter, or shortly after the
+/// gesture ends, so returning to the original value cannot revive it.
 #[derive(Debug, Clone, Copy)]
 struct Sent {
     /// The normalized value sent.
     value: f32,
     /// The parameter's normalized value when it was sent.
     over: f32,
+    /// Time of the last input or the end of its drag, in egui's clock.
+    at: f64,
 }
 
 impl Sent {
-    /// The normalized value to build on when the parameter reads `param`: what was last `sent`
-    /// while the parameter hasn't moved off the value it had then, else `param`, which also
-    /// follows host automation.
-    const fn building_on(sent: Option<Self>, param: f32) -> f32 {
-        match sent {
-            Some(sent) if sent.over.to_bits() == param.to_bits() => sent.value,
-            _ => param,
+    /// Builds on a pending change while the host catches up. Once acknowledged or expired,
+    /// forget it permanently, including if automation later returns to the original value.
+    fn building_on(sent: &mut Option<Self>, param: f32, now: f64, dragging: bool) -> f32 {
+        if let Some(pending) = *sent {
+            if pending.over.to_bits() == param.to_bits()
+                && (dragging || now - pending.at < HOST_GRACE_SECONDS)
+            {
+                return pending.value;
+            }
+            *sent = None;
         }
+        param
     }
 }
 
 /// What a dial keeps between frames, in egui's memory under the dial's id.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct State {
     /// The last value sent, if any.
     sent: Option<Sent>,
@@ -112,6 +129,37 @@ struct State {
     scrolled: f32,
     /// Whether a drag holds a gesture open.
     dragging: bool,
+    /// End a wheel burst after this time, giving the host time to record it.
+    wheel_until: Option<f64>,
+    /// Last-owner cleanup when the window's egui memory is dropped during a gesture.
+    cleanup: Option<Arc<GestureCleanup>>,
+}
+
+struct GestureCleanup {
+    active: AtomicBool,
+    finish: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl std::fmt::Debug for GestureCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GestureCleanup").finish_non_exhaustive()
+    }
+}
+
+impl Drop for GestureCleanup {
+    fn drop(&mut self) {
+        if self.active.load(Ordering::Relaxed) {
+            (self.finish)();
+        }
+    }
+}
+
+impl State {
+    fn disarm_cleanup(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.active.store(false, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A dial for one parameter, drawn and handled by [`Dial::show`].
@@ -122,6 +170,7 @@ pub struct Dial<'a, P: Param> {
     colour: Colour,
     thickness: f32,
     glow: bool,
+    on_close: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl<P: Param> std::fmt::Debug for Dial<'_, P> {
@@ -147,7 +196,33 @@ impl<'a, P: Param> Dial<'a, P> {
             colour,
             thickness,
             glow: false,
+            on_close: None,
         }
+    }
+
+    /// Ends an unfinished gesture when the editor's egui memory is dropped. The callback must
+    /// enqueue the end on the host's GUI executor, retaining the parameters until it runs; egui
+    /// memory can be dropped on another thread. It must not capture the egui context itself.
+    ///
+    /// Install this for editors that can close during a wheel burst or drag.
+    pub fn on_close(mut self, finish: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_close = Some(Arc::new(finish));
+        self
+    }
+
+    fn begin(&self, state: &mut State) {
+        self.setter.begin_set_parameter(self.param);
+        state.cleanup = self.on_close.as_ref().map(|finish| {
+            Arc::new(GestureCleanup {
+                active: AtomicBool::new(true),
+                finish: finish.clone(),
+            })
+        });
+    }
+
+    fn end(&self, state: &mut State) {
+        state.disarm_cleanup();
+        self.setter.end_set_parameter(self.param);
     }
 
     /// Gives the arc the glow of a lit one, for a plugin's main control.
@@ -165,29 +240,38 @@ impl<'a, P: Param> Dial<'a, P> {
         let id = Id::new(("family-ui dial", self.param.name()));
         let mut state: State = ui.data(|data| data.get_temp(id)).unwrap_or_default();
         let response = ui.interact(rect, id, Sense::click_and_drag());
-        let fine = ui.input(|input| input.modifiers.shift);
+        let (fine, now) = ui.input(|input| (input.modifiers.shift, input.time));
 
+        if state.wheel_until.is_some_and(|until| now >= until) {
+            state.wheel_until = None;
+            self.end(&mut state);
+        }
         if response.drag_started() && !state.dragging {
             // A drag that starts while one is still open means its release was lost (focus taken
             // mid-drag, say): carry on in that drag's gesture rather than opening a second one.
             state.dragging = true;
-            self.setter.begin_set_parameter(self.param);
+            if state.wheel_until.take().is_none() {
+                self.begin(&mut state);
+            }
         }
         if response.dragged() {
             // Points are the design-size canvas's own units, so a drag covers the same share of
             // the dial at any scale.
             let rise = -response.drag_delta().y;
             if rise != 0.0 {
-                let value = dragged(self.current(state), rise, fine);
-                self.set(&mut state, value);
+                let value = dragged(self.current(&mut state, now), rise, fine);
+                self.set(&mut state, value, now);
             }
         }
         if response.drag_stopped() && state.dragging {
             state.dragging = false;
-            self.setter.end_set_parameter(self.param);
+            if let Some(sent) = &mut state.sent {
+                sent.at = now;
+            }
+            self.end(&mut state);
         }
         if response.double_clicked() {
-            self.set(&mut state, self.param.default_normalized_value());
+            self.set(&mut state, self.param.default_normalized_value(), now);
         }
         if response.hovered() {
             state.scrolled += ui.input(|input| {
@@ -214,30 +298,51 @@ impl<'a, P: Param> Dial<'a, P> {
                     reason = "a whole number of notches from one frame's wheel events fits an i32"
                 )]
                 let notches = notches as i32;
-                let value = wheeled(self.current(state), notches, fine);
-                self.set(&mut state, value);
+                if !state.dragging {
+                    if state.wheel_until.is_none() {
+                        self.begin(&mut state);
+                    }
+                    state.wheel_until = Some(now + WHEEL_IDLE_SECONDS);
+                }
+                let value = wheeled(self.current(&mut state, now), notches, fine);
+                self.set(&mut state, value, now);
             }
         }
 
-        self.draw(ui, rect, self.current(state));
+        self.draw(ui, rect, self.current(&mut state, now));
+        if state.sent.is_some() {
+            // Also settle refused changes when the pointer stops moving.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(HOST_GRACE_SECONDS));
+        }
+        if let Some(until) = state.wheel_until {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64((until - now).max(0.0)));
+        }
         ui.data_mut(|data| data.insert_temp(id, state));
         response
     }
 
     /// The normalized value to show and build on: the last one sent while the parameter hasn't
     /// caught up with it, else the parameter's own, which also follows host automation.
-    fn current(&self, state: State) -> f32 {
-        Sent::building_on(state.sent, self.param.unmodulated_normalized_value())
+    fn current(&self, state: &mut State, now: f64) -> f32 {
+        Sent::building_on(
+            &mut state.sent,
+            self.param.unmodulated_normalized_value(),
+            now,
+            state.dragging,
+        )
     }
 
     /// Sets the parameter to `normalized`: inside the drag's gesture while a drag holds one, or
     /// as one whole gesture of its own.
-    fn set(&self, state: &mut State, normalized: f32) {
+    fn set(&self, state: &mut State, normalized: f32, now: f64) {
         state.sent = Some(Sent {
             value: normalized,
             over: self.param.unmodulated_normalized_value(),
+            at: now,
         });
-        let own_gesture = !state.dragging;
+        let own_gesture = !state.dragging && state.wheel_until.is_none();
         if own_gesture {
             self.setter.begin_set_parameter(self.param);
         }
@@ -298,6 +403,202 @@ impl<'a, P: Param> Dial<'a, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nice_plug::context::gui::GuiContextInner;
+    use nice_plug::params::internals::ParamPtr;
+    use nice_plug::prelude::{FloatParam, FloatRange, PluginApi, PluginState};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Host {
+        requests: Mutex<Vec<f32>>,
+        gestures: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl GuiContextInner for Host {
+        fn plugin_api(&self) -> PluginApi {
+            PluginApi::Clap
+        }
+        unsafe fn raw_begin_set_parameter(&self, _: ParamPtr) {
+            self.gestures.lock().expect("gestures").push("begin");
+        }
+        unsafe fn raw_set_parameter_normalized(&self, _: ParamPtr, value: f32) {
+            self.requests.lock().expect("requests").push(value);
+        }
+        unsafe fn raw_end_set_parameter(&self, _: ParamPtr) {
+            self.gestures.lock().expect("gestures").push("end");
+        }
+        fn get_state(&self) -> PluginState {
+            PluginState {
+                version: String::new(),
+                params: BTreeMap::new(),
+                fields: BTreeMap::new(),
+            }
+        }
+        fn set_state(&self, _: PluginState) {}
+        fn request_restart(&self) {}
+    }
+
+    /// Runs the real widget with a host-controlled parameter, and returns the painted dot's x
+    /// coordinate. Fresh parameters keep the fake host independent of nice-plug's unsafe setters;
+    /// the widget's state persists under its stable name, just as it does in an editor.
+    fn frame(ctx: &egui::Context, host: &Host, time: f64, value: f32, events: Vec<Event>) -> f32 {
+        let param = FloatParam::new("Width", value, FloatRange::Linear { min: 0.0, max: 1.0 });
+        let setter = ParamSetter { raw_context: host };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 200.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                Dial::new(
+                    &param,
+                    &setter,
+                    Colour {
+                        signal: egui::Color32::GREEN,
+                        lit: egui::Color32::GREEN,
+                    },
+                    4.0,
+                )
+                .on_close({
+                    let gestures = host.gestures.clone();
+                    move || gestures.lock().expect("gestures").push("end")
+                })
+                .show(
+                    ui,
+                    Rect::from_min_max(egui::pos2(20.0, 20.0), egui::pos2(180.0, 180.0)),
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let (min, max) = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                Shape::Mesh(mesh) => Some(mesh.vertices.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|v| v.color == DOT)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), v| {
+                (min.min(v.pos.x), max.max(v.pos.x))
+            });
+        assert!(
+            min.is_finite() && max.is_finite(),
+            "the dial painted its dot"
+        );
+        min.midpoint(max)
+    }
+
+    fn wheel() -> Vec<Event> {
+        vec![
+            Event::PointerMoved(egui::pos2(100.0, 100.0)),
+            Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                phase: egui::TouchPhase::Move,
+                delta: vec2(0.0, 1.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn wheel_burst_keeps_a_gesture_open_until_the_host_can_record_it() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, 0.5, vec![]);
+        frame(&ctx, &host, 0.01, 0.5, wheel());
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin"]);
+        frame(&ctx, &host, 0.07, 0.55, wheel());
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin"]);
+        frame(&ctx, &host, 0.3, 0.6, vec![]);
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin", "end"]);
+        let requests = host.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert_close(requests[0], 0.55);
+        assert_close(requests[1], 0.6);
+    }
+
+    #[test]
+    fn closing_the_window_ends_a_pending_wheel_gesture_once() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, 0.5, vec![]);
+        frame(&ctx, &host, 0.01, 0.5, wheel());
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin"]);
+        drop(ctx);
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin", "end"]);
+    }
+
+    #[test]
+    fn ending_a_wheel_gesture_disarms_its_window_close_cleanup() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, 0.5, vec![]);
+        frame(&ctx, &host, 0.01, 0.5, wheel());
+        frame(&ctx, &host, 0.3, 0.55, vec![]);
+        drop(ctx);
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin", "end"]);
+    }
+
+    #[test]
+    fn the_painted_arc_returns_with_touch_automation() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        let original = frame(&ctx, &host, 0.0, 0.5, vec![]);
+        let changed = frame(&ctx, &host, 0.01, 0.5, wheel());
+        assert!(changed > original + 10.0);
+        frame(&ctx, &host, 0.02, 0.55, vec![]);
+        assert_close(frame(&ctx, &host, 0.03, 0.5, vec![]), original);
+    }
+
+    #[test]
+    fn rapid_wheel_notches_accumulate_but_a_refused_change_does_not_stick() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        let original = frame(&ctx, &host, 0.0, 0.5, vec![]);
+        frame(&ctx, &host, 0.01, 0.5, wheel());
+        frame(&ctx, &host, 0.02, 0.5, wheel());
+        let requests = host.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        for (&actual, expected) in requests.iter().zip([0.55, 0.6]) {
+            assert_close(actual, expected);
+        }
+        drop(requests);
+        assert_close(frame(&ctx, &host, 0.2, 0.5, vec![]), original);
+    }
+
+    #[test]
+    fn a_drag_keeps_pending_input_until_release_then_settles() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        let original = frame(&ctx, &host, 0.0, 0.5, vec![]);
+        let button = |pressed, pos| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let start = egui::pos2(100.0, 100.0);
+        let end = egui::pos2(100.0, 80.0);
+        frame(
+            &ctx,
+            &host,
+            0.01,
+            0.5,
+            vec![Event::PointerMoved(start), button(true, start)],
+        );
+        let dragged = frame(&ctx, &host, 0.02, 0.5, vec![Event::PointerMoved(end)]);
+        assert!(dragged > original + 10.0);
+        assert_close(frame(&ctx, &host, 1.0, 0.5, vec![]), dragged);
+        assert_close(
+            frame(&ctx, &host, 1.01, 0.5, vec![button(false, end)]),
+            dragged,
+        );
+        assert_close(frame(&ctx, &host, 1.2, 0.5, vec![]), original);
+    }
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -345,19 +646,57 @@ mod tests {
 
     #[test]
     fn a_sent_value_is_built_on_until_the_parameter_moves_off_its_old_value() {
-        let sent = Some(Sent {
+        let mut sent = Some(Sent {
             value: 0.6,
             over: 0.5,
+            at: 0.0,
         });
 
         // The host hasn't taken the change yet.
-        assert_close(Sent::building_on(sent, 0.5), 0.6);
+        assert_close(Sent::building_on(&mut sent, 0.5, 0.0, false), 0.6);
         // It has.
-        assert_close(Sent::building_on(sent, 0.6), 0.6);
+        assert_close(Sent::building_on(&mut sent, 0.6, 0.01, false), 0.6);
         // Automation has moved the parameter since.
-        assert_close(Sent::building_on(sent, 0.2), 0.2);
+        assert_close(Sent::building_on(&mut sent, 0.2, 0.02, false), 0.2);
         // Nothing sent yet.
-        assert_close(Sent::building_on(None, 0.3), 0.3);
+        assert_close(Sent::building_on(&mut None, 0.3, 0.0, false), 0.3);
+    }
+
+    #[test]
+    fn automation_returning_to_the_original_value_does_not_revive_a_sent_value() {
+        let mut sent = Some(Sent {
+            value: 0.55,
+            over: 0.5,
+            at: 0.0,
+        });
+        assert_close(Sent::building_on(&mut sent, 0.5, 0.0, false), 0.55);
+        assert_close(Sent::building_on(&mut sent, 0.55, 0.01, false), 0.55);
+        assert_close(Sent::building_on(&mut sent, 0.5, 0.02, false), 0.5);
+    }
+
+    #[test]
+    fn a_change_the_host_never_reports_expires_after_input_ends() {
+        let mut sent = Some(Sent {
+            value: 0.55,
+            over: 0.5,
+            at: 0.0,
+        });
+        assert_close(Sent::building_on(&mut sent, 0.5, 0.05, false), 0.55);
+        assert_close(Sent::building_on(&mut sent, 0.5, 0.1, false), 0.5);
+        assert_close(Sent::building_on(&mut sent, 0.5, 0.2, false), 0.5);
+    }
+
+    #[test]
+    fn a_pending_change_is_kept_during_a_long_drag() {
+        let mut sent = Some(Sent {
+            value: 0.55,
+            over: 0.5,
+            at: 0.0,
+        });
+        assert_close(Sent::building_on(&mut sent, 0.5, 10.0, true), 0.55);
+        // Even during a drag, a value observed from the host retires the pending change.
+        assert_close(Sent::building_on(&mut sent, 0.55, 10.01, true), 0.55);
+        assert_close(Sent::building_on(&mut sent, 0.5, 10.02, true), 0.5);
     }
 
     #[test]
