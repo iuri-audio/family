@@ -45,6 +45,10 @@ A launcher runs Reaper on a scratch copy of the developer's configuration (setti
 - **Linux, Reaper from Flathub**: [`reaper/run-flatpak.sh`](reaper/run-flatpak.sh).
 - **WSL, Reaper on Windows**: `bash reaper/run-wsl.sh <out-dir> <script.lua> KEY=VALUE...`. Use an output folder on a Windows drive (`/mnt/c/...`): Reaper cannot reliably write a configuration through the WSL network share. `REAPER_EXE` and `REAPER_CONFIG` override the default installation and configuration paths; `REAPER_RESOURCE_DIR` can reuse a scratch resource folder between runs to avoid repeating Reaper's first-run resource setup. Never point it at the developer's real resource folder. The launcher disables a copied default-project template so a missing template cannot block the script. Its PowerShell helper stops only the process it launched on timeout.
 
+For scripts that need media files staged on the Windows drive, use `bash reaper/stage-and-run-wsl.sh <out-dir> <script.lua> <input-file>... [-- KEY=VALUE...]`. It copies each input by basename under `$OUT/input` and then uses `run-wsl.sh`; environment pairs after `--` are passed through to the ReaScript.
+
+`reaper/align-onsets.py` is a detector-independent aligner for ordered onset sequences. It accepts a detector executable and arguments, expects one output line per detection in the form `<seconds> s (sample <n>), late <milliseconds> ms`, and writes paired offset summaries and unmatched counts. Use `--reference-pair LABEL LEFT.wav RIGHT.wav` for additional pairs not staged under `$OUT/input`.
+
 ## Saved projects and new instances (Windows)
 
 Reopening one instance can pass while a newly added instance opens cropped. [`reaper/new-instance.lua`](reaper/new-instance.lua) saves one instance, closes and reloads its project, opens that saved instance, then adds three new instances and opens each twice. It plays no audio. [`reaper/run-wsl-new-instance.sh`](reaper/run-wsl-new-instance.sh) runs it alongside the Windows checker, waiting for a physical host/canvas measurement at each step before closing that window.
