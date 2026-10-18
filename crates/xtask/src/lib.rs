@@ -8,11 +8,12 @@
 //! cargo xtask bundle --release --target x86_64-pc-windows-msvc   # Windows, via cargo-xwin
 //! cargo xtask install --release --target x86_64-pc-windows-msvc  # bundle, then install
 //! cargo xtask install --flatpak --release                         # for Flathub's Reaper
+//! cargo xtask e2e --release --target x86_64-pc-windows-msvc      # end-to-end checks in Reaper
 //! ```
 //!
-//! Any arguments after `bundle` or `install` go to `cargo build`, apart from `--flatpak`. A Windows
-//! MSVC target built from another OS goes through `cargo xwin build`, which supplies the MSVC
-//! headers, libraries and linker.
+//! Any arguments after `bundle`, `install` or `e2e` go to `cargo build`, apart from `--flatpak`. A
+//! Windows MSVC target built from another OS goes through `cargo xwin build`, which supplies the
+//! MSVC headers, libraries and linker.
 //!
 //! `install` copies `<Name>.vst3` and `<Name>.clap` into the `VST3/` and `CLAP/` folders under the
 //! directory in the plugin's environment variable.
@@ -22,10 +23,16 @@
 //! than the runtime has. With `install`, it installs into `~/.vst3` and `~/.clap`, so it needs no
 //! environment variable.
 //!
+//! `e2e` bundles with the test hooks (the plugin's `e2e-hooks` feature, which forwards family-ui's)
+//! into `target/e2e/`, never where a release build goes, then runs the end-to-end checks in Reaper:
+//! on Windows from WSL with a Windows MSVC target, or in Flathub's Reaper with `--flatpak`. See
+//! [`e2e`] and `docs/driving-reaper.md`.
+//!
 //! This wraps `nice_plug_xtask::bundle` instead of using `nice_plug_xtask::main`, because `main`
 //! takes the outermost directory with a `Cargo.toml` as the workspace root, which is the wrong
 //! one when a plugin's repo is checked out inside another (as git worktrees under `.claude/` are).
 
+mod e2e;
 mod flatpak;
 mod install;
 
@@ -49,7 +56,7 @@ pub struct Plugin<'a> {
     pub workspace_root: &'a Path,
 }
 
-const USAGE: &str = "usage: cargo xtask bundle|install [--flatpak] [cargo build arguments, e.g. \
+const USAGE: &str = "usage: cargo xtask bundle|install|e2e [--flatpak] [cargo build arguments, e.g. \
                      --release --target <triple>]";
 
 /// Runs `bundle` or `install` for `plugin`, with the arguments the process was started with.
@@ -88,6 +95,24 @@ pub fn main(plugin: &Plugin<'_>) -> anyhow::Result<()> {
             print_installed(plugin.workspace_root, &cargo_args, &installed);
             Ok(())
         }
+        Some("e2e") => {
+            // Fail before the build if there is no Reaper to run the checks in.
+            let host = e2e::Host::for_build(flatpak, target(&cargo_args))?;
+            cargo_args.extend(["--features".to_owned(), e2e::HOOKS_FEATURE.to_owned()]);
+            if !flatpak {
+                // A flatpak build already goes in its own folder.
+                let target_dir = plugin
+                    .workspace_root
+                    .join("target")
+                    .join(e2e::TARGET_SUBDIR);
+                cargo_args.extend([
+                    "--target-dir".to_owned(),
+                    target_dir.to_string_lossy().into_owned(),
+                ]);
+            }
+            let bundled = bundle(&cargo_args)?;
+            e2e::run(plugin, &bundled, host)
+        }
         _ => bail!(USAGE),
     }
 }
@@ -108,8 +133,10 @@ fn bundle(plugin: &Plugin<'_>, cargo_args: &[String]) -> anyhow::Result<PathBuf>
         .context("could not run cargo (is cargo-xwin installed for Windows builds?)")?;
     ensure!(status.success(), "building {package} failed");
 
-    let target_dir =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let target_dir = cargo_option(cargo_args, "--target-dir").map_or_else(
+        || std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from),
+        PathBuf::from,
+    );
     nice_plug_xtask::bundle(&target_dir, package, cargo_args, false)?;
     Ok(target_dir.join("bundled"))
 }

@@ -1,6 +1,6 @@
 [package]
 name        = "family-xtask"
-description = "Build helper for the family's plugins: builds and bundles a plugin as VST3 and CLAP, and installs it."
+description = "Build helper for the family's plugins: builds and bundles a plugin as VST3 and CLAP, installs it, and runs its end-to-end checks in Reaper."
 version     = "0.1.0"
 edition.workspace    = true
 publish.workspace    = true

@@ -6,6 +6,10 @@ edition.workspace    = true
 publish.workspace    = true
 repository.workspace = true
 
+[features]
+# Test hooks for `cargo xtask e2e` (src/e2e.rs). Only that build turns it on: never ship it.
+e2e-hooks = []
+
 [dependencies]
 egui = { version = "0.36.1", default-features = false }
 nice-plug = { version = "0.4.2", default-features = false, features = ["editor"] }
