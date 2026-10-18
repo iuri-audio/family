@@ -14,7 +14,7 @@ When a bug only shows in a host (the editor, automation, transport, latency, sta
 A launcher runs Reaper on a scratch copy of the developer's configuration (settings, licence and plugin scan), so a run never changes theirs; passes the environment to the script; refuses to start while the developer's Reaper is open; and exits 124 when Reaper hasn't quit within `RUN_TIMEOUT` seconds (default 120).
 
 - **Linux, Reaper from Flathub**: [`reaper/run-flatpak.sh`](reaper/run-flatpak.sh).
-- **WSL, Reaper on Windows**: no launcher yet. Write `reaper/run-wsl.sh` to the same contract the first time you need it, check it against a real run, and commit it beside the Flatpak one. The pieces that differ: Reaper is `reaper.exe` under `/mnt/c/Program Files/REAPER (x64)/`; its configuration is in `%APPDATA%\REAPER` unless the install is portable; paths given to it go through `wslpath -w`; the environment reaches it through `WSLENV` (with `/p` on path variables); and `tasklist.exe` and `taskkill.exe` stand in for `pgrep` and stopping it after a timeout.
+- **WSL, Reaper on Windows**: `bash reaper/run-wsl.sh <out-dir> <script.lua> KEY=VALUE...`. Use an output folder on a Windows drive (`/mnt/c/...`): Reaper cannot reliably write a configuration through the WSL network share. `REAPER_EXE` and `REAPER_CONFIG` override the default installation and configuration paths; `REAPER_RESOURCE_DIR` can reuse a scratch resource folder between runs to avoid repeating Reaper's first-run resource setup. Never point it at the developer's real resource folder. The launcher disables a copied default-project template so a missing template cannot block the script. Its PowerShell helper stops only the process it launched on timeout.
 
 ## The script's contract
 
@@ -29,6 +29,7 @@ Where only a person can act (mouse gestures on a plugin's editor) or see (a lamp
 
 ## Runs worth trusting
 
+- **Measure the host as well as the canvas.** A correct zoom log does not prove the host's window is large enough. On Windows, run `reaper/check-editor-windows.ps1` alongside the editor cycles, passing `-Title '*<plugin name>*' -Width <physical width> -Height <physical height> -Count <cycles> -Output <json path>`. It retains each window's final client size and checks both Reaper's parent and the baseview child. `-Seconds` must cover startup and every cycle. It sets a per-monitor DPI context so the measurements are physical pixels, not DPI-virtualised coordinates. The plugin's zoom log is still needed to catch a correctly sized window with an enlarged canvas inside it.
 - **Load** brings timing bugs out. While the script runs, keep every core busy, e.g. `for i in $(seq $(nproc)); do timeout 90 sh -c 'while :; do :; done' & done` (in WSL too: its processes share the machine's cores).
 - **Count before calling a fix good.** At a failure rate of p, about 3/p clean runs in a row give 95 % confidence: about 35 at 1 in 12.
 - **Check that the run exercised the fix**, from the logs, not only that it passed.

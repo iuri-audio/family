@@ -15,6 +15,12 @@
 //! 4. egui's scale can differ from the host's: the first editor window in a process misses the
 //!    host's display scale on Windows, and on Linux Reaper doesn't scale its windows by the display
 //!    scale egui reads.
+//! 5. nice-plug-egui can retain a size that already includes zoom, which egui-baseview multiplies
+//!    by zoom again on reopening. Reuse the first window's scale calibration instead of measuring
+//!    that enlarged window as another display-scale change.
+//! 6. On Windows, a child already at the desired size emits no `WM_SIZE` when pinned to that size,
+//!    so a smaller host parent can stay cropped. Make an actual size change on opening, then
+//!    restore the exact canvas size to notify the host.
 //!
 //! It logs what it measures and every zoom and size it asks for through nice-plug's logger, so
 //! `NICE_LOG` set to a file path shows how an editor settled in a host.
@@ -39,6 +45,14 @@ const GRIP_PATIENCE: f64 = 0.2;
 /// gives up measuring the host's scale. Reaper first shows a 10000-pixel square placeholder.
 const OPENING_FRAMES: u32 = 30;
 
+/// Opening resize steps. A real size change makes baseview notify the host even when the child
+/// already has the desired size and resizing it to that same size would emit no event.
+#[derive(Debug, Clone, Copy)]
+enum HostResize {
+    Notify,
+    Restore,
+}
+
 /// The evenly scaled canvas, kept by the plugin's editor across openings.
 #[derive(Debug)]
 pub struct Canvas {
@@ -52,6 +66,11 @@ pub struct Canvas {
     /// on opening (bug 4): the host's whole scale for the first window in a process, 1 once egui
     /// gets it right.
     missed_scale: f32,
+    /// egui's native scale when the host's scale was calibrated. Kept across openings so a new
+    /// native scale can be accounted for without measuring an already zoomed opening size.
+    native_scale: Option<f32>,
+    /// Synchronise the host's opening size with the child window, then restore the exact size.
+    host_resize: Option<HostResize>,
     /// Frames since the editor opened, while the missed scale is yet to be measured.
     opening: Option<u32>,
     /// Whether a zoom has been set that is yet to take effect.
@@ -79,6 +98,12 @@ impl Canvas {
             scale,
             colour,
             missed_scale: 1.0,
+            native_scale: None,
+            host_resize: if cfg!(target_os = "windows") {
+                Some(HostResize::Notify)
+            } else {
+                None
+            },
             opening: Some(0),
             settling: false,
             last_zoom: 1.0,
@@ -89,19 +114,23 @@ impl Canvas {
         }
     }
 
-    /// Starts measuring the host's scale afresh for a newly opened window. Call it from the
+    /// Starts settling a newly opened window. Call it from the
     /// editor's `build`, since `editor_closed` is never called (bug 1).
     ///
     /// It logs the opening before the window draws anything, so an editor that never draws shows
     /// in the log as an opening with no "opened at" line after it.
     pub fn opened(&mut self) {
         nice_log!("family-ui: editor window built, waiting for its first frame");
-        self.missed_scale = 1.0;
         self.opening = Some(0);
         self.settling = false;
         self.corrected = None;
         self.grip = None;
         self.pending_zoom = None;
+        self.host_resize = if cfg!(target_os = "windows") {
+            Some(HostResize::Notify)
+        } else {
+            None
+        };
     }
 
     /// Scales the canvas and fills it with the panel, then has `contents` draw the editor on it
@@ -138,8 +167,29 @@ impl Canvas {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size));
         }
 
-        ui.painter().rect_filled(ctx.content_rect(), 0.0, PANEL);
         if self.opening.is_none() && !self.settling {
+            match self.host_resize {
+                Some(HostResize::Notify) => {
+                    // baseview only notifies the host on a changed WM_SIZE. On Windows the
+                    // child can already be at the desired size while its parent is still too
+                    // small, so pinning it to that same size leaves the host cropped. Nudge it
+                    // once, then restore it next frame. Two points still change a whole physical
+                    // pixel at the smallest user scale. Keep the panel blank until this settles.
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size + Vec2::splat(2.0)));
+                    self.host_resize = Some(HostResize::Restore);
+                    ctx.request_repaint();
+                }
+                Some(HostResize::Restore) => {
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.size));
+                    self.host_resize = None;
+                    ctx.request_repaint();
+                }
+                None => {}
+            }
+        }
+
+        ui.painter().rect_filled(ctx.content_rect(), 0.0, PANEL);
+        if self.opening.is_none() && !self.settling && self.host_resize.is_none() {
             contents(ui);
             ui.painter().rect_filled(
                 Rect::from_min_size(Pos2::ZERO, vec2(self.size.x, COLOUR_BAR_HEIGHT)),
@@ -165,7 +215,17 @@ impl Canvas {
             return;
         }
         self.opening = None;
-        self.missed_scale = measured.unwrap_or(1.0);
+        let native = ctx.native_pixels_per_point().unwrap_or(1.0);
+        // A reopened window is not a fresh display-scale measurement: nice-plug-egui may have
+        // saved its zoomed size without receiving a resize event that strips the zoom (bug 5).
+        // Keep the first calibration, compensating if egui now accounts for more of the scale.
+        self.missed_scale = self.native_scale.map_or_else(
+            || measured.unwrap_or(1.0),
+            |previous| self.missed_scale * previous / native,
+        );
+        if measured.is_some() || self.native_scale.is_some() {
+            self.native_scale = Some(native);
+        }
         let target = self.missed_scale * self.scale.get();
         nice_log!(
             "family-ui: opened at {:?} points and zoom {} after {} frames; missed scale {:?}, \
@@ -173,7 +233,7 @@ impl Canvas {
             points,
             zoom,
             frames,
-            measured,
+            self.missed_scale,
             target
         );
         if (target - zoom).abs() > 1e-3 {
@@ -292,6 +352,80 @@ mod tests {
 
     const SIZE: Vec2 = vec2(720.0, 420.0);
 
+    #[test]
+    fn opening_notifies_a_host_that_only_hears_actual_child_size_changes() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|options| options.zoom_factor = 1.5);
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::new(EditorScale::default()),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        // The Windows child has its final physical size, but Reaper's parent is still at
+        // the unscaled size. No WM_SIZE (and therefore no host request) is emitted if a
+        // viewport command asks for exactly the size the child already has.
+        canvas.host_resize = Some(HostResize::Notify);
+        let mut child = SIZE * 1.5;
+        let mut host = SIZE;
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, child / ctx.zoom_factor())),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| canvas.show(ui, |_| {}));
+            output.textures_delta.clear();
+            for viewport in output.viewport_output.values() {
+                for command in &viewport.commands {
+                    if let ViewportCommand::InnerSize(size) = command {
+                        let requested = (*size * ctx.zoom_factor()).round();
+                        if requested != child {
+                            child = requested;
+                            host = requested;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(child, SIZE * 1.5);
+        assert_eq!(host, child, "the parent clips the correctly scaled child");
+    }
+
+    #[test]
+    fn reopening_at_windows_display_scale_keeps_the_same_zoom() {
+        let scale = Arc::new(EditorScale::default());
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::clone(&scale),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        let mut restored_zoom = 1.0;
+        for opening in 0..4 {
+            let ctx = egui::Context::default();
+            ctx.set_zoom_factor(restored_zoom);
+            canvas.opened();
+            // egui-baseview prepares the first input using the restored zoom before egui
+            // has applied it. Windows supplies the real window size immediately.
+            frame(&mut canvas, &ctx, 0.0, Vec2::splat(10_000.0), vec![]);
+            // The adapter can retain a size that already includes the previous zoom when
+            // Windows sends no resize event after pinning the window to its existing size.
+            let window = SIZE * 1.5 * restored_zoom;
+            frame(&mut canvas, &ctx, 0.01, window, vec![]);
+            frame(&mut canvas, &ctx, 0.02, window, vec![]);
+            restored_zoom = ctx.zoom_factor();
+            assert!(
+                (restored_zoom - 1.5).abs() < 1e-5,
+                "opening {opening}: expected zoom 1.5, got {restored_zoom}"
+            );
+            assert!((scale.get() - 1.0).abs() < 1e-5);
+        }
+    }
+
     fn frame(
         canvas: &mut Canvas,
         ctx: &egui::Context,
@@ -299,14 +433,75 @@ mod tests {
         window: Vec2,
         events: Vec<Event>,
     ) {
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, window / ctx.zoom_factor())),
+        frame_with_native(canvas, ctx, time, window, events, 1.0);
+    }
+
+    fn frame_with_native(
+        canvas: &mut Canvas,
+        ctx: &egui::Context,
+        time: f64,
+        window: Vec2,
+        events: Vec<Event>,
+        native: f32,
+    ) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                Pos2::ZERO,
+                window / (ctx.zoom_factor() * native),
+            )),
             time: Some(time),
             events,
             ..Default::default()
         };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(native);
         let mut output = ctx.run_ui(input, |ui| canvas.show(ui, |_| {}));
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn reopening_on_linux_keeps_the_scale_even_after_the_users_scale_changes() {
+        reopening_with_native(&[1.645_833_4; 4], 1.0);
+    }
+
+    #[test]
+    fn reopening_accounts_for_a_changed_native_scale() {
+        reopening_with_native(&[1.0, 1.5, 1.5, 1.0], 1.5);
+    }
+
+    fn reopening_with_native(natives: &[f32], host: f32) {
+        let scale = Arc::new(EditorScale::default());
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::clone(&scale),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        let mut restored = 1.0;
+        for (&native, user) in natives.iter().zip([1.0, 1.25, 1.25, 0.75]) {
+            scale.set(user);
+            let ctx = egui::Context::default();
+            ctx.set_zoom_factor(restored);
+            canvas.opened();
+            for (time, window) in [
+                (0.0, Vec2::splat(10_000.0)),
+                (0.01, SIZE * host),
+                (0.02, SIZE * host),
+            ] {
+                frame_with_native(&mut canvas, &ctx, time, window, vec![], native);
+            }
+            restored = ctx.zoom_factor();
+            assert!(
+                (restored - host * user / native).abs() < 1e-5,
+                "native {native}, user {user}: got zoom {restored}"
+            );
+            assert!((scale.get() - user).abs() < 1e-5);
+        }
     }
 
     #[test]
@@ -334,7 +529,10 @@ mod tests {
         };
         let mut canvas = Canvas::new(SIZE, Arc::clone(&scale), colour);
         let start = pos2(712.0, 412.0);
-        frame(&mut canvas, &ctx, 0.0, SIZE, vec![]);
+        // Settle the opening resize before the grip receives its first press.
+        for time in [-0.02, -0.01, 0.0] {
+            frame(&mut canvas, &ctx, time, SIZE, vec![]);
+        }
         frame(
             &mut canvas,
             &ctx,

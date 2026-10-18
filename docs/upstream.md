@@ -8,7 +8,7 @@ nice-plug-egui 0.5 → egui-baseview 0.7 → baseview 0.3, all from [RustAudio](
 
 ## Workarounds in family-ui
 
-`Canvas` (`crates/ui/src/canvas.rs`) works around four egui-baseview 0.7 and nice-plug-egui 0.5 bugs, listed in its module docs and commented where each is handled. Drop each workaround once its bug is fixed upstream.
+`Canvas` (`crates/ui/src/canvas.rs`) works around six egui-baseview 0.7 and nice-plug-egui 0.5 bugs, listed in its module docs and commented where each is handled. Drop each workaround once its bug is fixed upstream.
 
 ## The baseview fork
 
