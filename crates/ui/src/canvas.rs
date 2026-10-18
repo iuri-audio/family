@@ -66,6 +66,8 @@ pub struct Canvas {
     grip: Option<(f32, Pos2)>,
     /// When the grip last set the zoom, in egui's time in seconds.
     zoom_set_at: f64,
+    /// The latest grip request, retained until the host catches up, even after release.
+    pending_zoom: Option<f32>,
 }
 
 impl Canvas {
@@ -83,6 +85,7 @@ impl Canvas {
             corrected: None,
             grip: None,
             zoom_set_at: 0.0,
+            pending_zoom: None,
         }
     }
 
@@ -98,6 +101,7 @@ impl Canvas {
         self.settling = false;
         self.corrected = None;
         self.grip = None;
+        self.pending_zoom = None;
     }
 
     /// Scales the canvas and fills it with the panel, then has `contents` draw the editor on it
@@ -213,26 +217,36 @@ impl Canvas {
                 })
         });
         if let (Some((from_zoom, from)), Some(pointer)) = (self.grip, moved)
-            && response.dragged()
+            && (response.dragged() || response.drag_stopped())
         {
+            self.pending_zoom = Some(
+                (from_zoom * grip_scale(pointer - from, from_zoom, self.size)).clamp(
+                    scale::MIN * self.missed_scale,
+                    scale::MAX * self.missed_scale,
+                ),
+            );
+        }
+        if let Some(new_zoom) = self.pending_zoom {
             // Until the host has resized the window to the last zoom, the frame is drawn cropped:
             // wait for it before stepping the zoom again. Whole-pixel window sizes leave it a
-            // point or so off, so within 1 % counts.
+            // point or so off, so within 1 % counts. Keep the request across frames: waiting must
+            // not discard the final mouse move, including one delivered with a button release.
             let now = ctx.input(|input| input.time);
             let off = (ctx.content_rect().size() - self.size).abs();
             let caught_up = (off.x <= self.size.x * 0.01 && off.y <= self.size.y * 0.01)
-                || now - self.zoom_set_at > GRIP_PATIENCE;
-            let new_zoom = (from_zoom * grip_scale(pointer - from, from_zoom, self.size)).clamp(
-                scale::MIN * self.missed_scale,
-                scale::MAX * self.missed_scale,
-            );
+                || now - self.zoom_set_at >= GRIP_PATIENCE;
             if caught_up {
+                self.pending_zoom = None;
                 self.scale.set(new_zoom / self.missed_scale);
                 if (new_zoom - zoom).abs() > 1e-3 {
                     nice_log!("family-ui: grip sets zoom {}", new_zoom);
                     ctx.set_zoom_factor(new_zoom);
                     self.zoom_set_at = now;
                 }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    (self.zoom_set_at + GRIP_PATIENCE - now).max(0.0),
+                ));
             }
         }
         if response.drag_stopped() {
@@ -277,6 +291,113 @@ mod tests {
     use super::*;
 
     const SIZE: Vec2 = vec2(720.0, 420.0);
+
+    fn frame(
+        canvas: &mut Canvas,
+        ctx: &egui::Context,
+        time: f64,
+        window: Vec2,
+        events: Vec<Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, window / ctx.zoom_factor())),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| canvas.show(ui, |_| {}));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_grip_move_waiting_for_the_host_is_applied_when_the_host_catches_up() {
+        delayed_grip_move(false, false);
+    }
+
+    #[test]
+    fn a_grip_move_is_kept_after_release_while_waiting_for_the_host() {
+        delayed_grip_move(true, false);
+    }
+
+    #[test]
+    fn a_grip_move_is_applied_after_patience_runs_out_without_another_event() {
+        delayed_grip_move(false, true);
+        delayed_grip_move(true, true);
+    }
+
+    fn delayed_grip_move(release: bool, host_refuses: bool) {
+        let ctx = egui::Context::default();
+        let scale = Arc::new(EditorScale::default());
+        let colour = Colour {
+            signal: egui::Color32::WHITE,
+            lit: egui::Color32::WHITE,
+        };
+        let mut canvas = Canvas::new(SIZE, Arc::clone(&scale), colour);
+        let start = pos2(712.0, 412.0);
+        frame(&mut canvas, &ctx, 0.0, SIZE, vec![]);
+        frame(
+            &mut canvas,
+            &ctx,
+            0.01,
+            SIZE,
+            vec![
+                Event::PointerMoved(start),
+                Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        frame(
+            &mut canvas,
+            &ctx,
+            0.02,
+            SIZE,
+            vec![Event::PointerMoved(start + vec2(72.0, 42.0))],
+        );
+        assert!(
+            (scale.get() - 1.1).abs() < 1e-5,
+            "first move: {}",
+            scale.get()
+        );
+        // The zoom takes effect before the host grows the window. egui-baseview converted
+        // this move using the previous frame's zoom (1).
+        let latest = start + vec2(144.0, 84.0);
+        let mut events = vec![Event::PointerMoved(latest)];
+        if release {
+            events.push(Event::PointerButton {
+                pos: latest,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        frame(&mut canvas, &ctx, 0.03, SIZE, events);
+        assert!((scale.get() - 1.1).abs() < 1e-5, "wait for the host");
+        // No further pointer event: either the host catches up or the patience expires.
+        let time = if host_refuses { 0.23 } else { 0.04 };
+        let window = if host_refuses { SIZE } else { SIZE * 1.1 };
+        frame(&mut canvas, &ctx, time, window, vec![]);
+        assert!(
+            (scale.get() - 1.2).abs() < 1e-5,
+            "latest move was lost: {}",
+            scale.get()
+        );
+        // Apply the last resize and keep the pointer still across several zoomed frames.
+        for step in 1..=3 {
+            frame(
+                &mut canvas,
+                &ctx,
+                f64::from(step).mul_add(0.01, time),
+                SIZE * 1.2,
+                vec![],
+            );
+            assert!((ctx.zoom_factor() - 1.2).abs() < 1e-5);
+            assert!((scale.get() - 1.2).abs() < 1e-5);
+        }
+    }
 
     #[test]
     fn a_window_of_the_canvas_shape_gives_the_missed_scale() {
