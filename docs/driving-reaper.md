@@ -9,6 +9,26 @@ When a bug only shows in a host (the editor, automation, transport, latency, sta
 3. **Run it** with your platform's launcher (below): `<launcher> <out-dir> <script.lua> KEY=VALUE...`. Each `KEY=VALUE` reaches the script as an environment variable, beside `OUT`, `NICE_LOG` and `PRELUDE`. Give each run a new `<out-dir>`: the launcher refuses one that holds an earlier run's results.
 4. **Read the results**: the script's own files in `<out-dir>`, the plugin's log in `<out-dir>/nice.log` (family-ui logs each editor opening and how it settled), and Reaper's output in `<out-dir>/reaper.stdout`.
 
+## The end-to-end checks
+
+`cargo xtask e2e` (from a plugin's repo, with the same arguments as `bundle`) builds the plugin and runs a fixed set of checks in Reaper against that build, then exits non-zero unless every one passes. Run it before bumping a plugin's family rev and before a release:
+
+```sh
+cargo xtask e2e --release --target x86_64-pc-windows-msvc   # WSL: Windows build, Windows Reaper
+cargo xtask e2e --release --flatpak                         # Linux: Flatpak build, Flathub's Reaper
+```
+
+The two test different builds in different hosts (window code, display scaling, audio), so a pass on one says nothing about the other.
+
+**The test hooks.** The build is the release profile with the test hooks compiled in: family-ui's `e2e-hooks` feature, which each plugin forwards as its own `e2e-hooks` feature (`e2e-hooks = ["family-ui/e2e-hooks"]` in its plugin crate). It goes to `target/e2e/`, never `target/bundled/`, so it can't be installed or shipped by mistake. A hook does nothing unless its environment variable, named `FAMILY_E2E_*`, is set when Reaper starts. A check asks for one in its leading comments with `-- e2e-env: KEY=VALUE`; that's also why each check runs in a Reaper of its own. Each plugin's CI builds its release library and fails if `FAMILY_E2E_` appears in it.
+
+- **Family's checks**, in [`reaper/checks/`](reaper/checks/), run for every plugin: `load` (each format loads from the build under test, its editor opens, a parameter the host sets stays set, the editor reopens) `automation` (with the editor open, a parameter follows a ramp of automation through playback) and `wheel` (through the wheel hook, in touch mode: a burst of notches is recorded whole, and the parameter returns to the automation after the burst and when the editor closes mid-burst; it fails on the build before the fix for family issue 2). They exercise `$PARAM` if set, else the first continuous parameter, which for `wheel` must have a dial.
+- **A plugin's checks** are the `*.lua` files in its `tests/reaper/`.
+
+Each check runs in a new folder under the run's folder (printed at the start; on WSL under `%LOCALAPPDATA%\Temp`), with a copy of the bundles and a scratch configuration whose plugin paths name only that copy, so it never loads or changes the installed build. A check ends with `drive.pass`, `drive.fail` (the plugin misbehaved) or `drive.error` (the check couldn't run). A check that leaves no verdict, such as one that hangs until `RUN_TIMEOUT` (default 90 s here), is reported BROKEN: like an ERROR, it says nothing about the plugin, so fix the check. On Linux the plugin-path settings' names are unverified: `load` fails if a VST3 loads from elsewhere, but can't tell which CLAP loaded.
+
+**Adding a check.** When a script reproduces a host bug with a clear verdict, and it fails on the build before the fix and passes after, it belongs in the suite: in family's `reaper/checks/` (and `FILES` in `crates/xtask/src/e2e.rs`) if it takes the plugin as a parameter, else in the plugin's `tests/reaper/`. When a check needs input a script can't give, add a hook in `crates/ui/src/e2e.rs`, behind the feature and a `FAMILY_E2E_*` variable, leaving the code path unchanged while the variable is unset. A check needing a person's eyes or hands (like [`touch.lua`](reaper/touch.lua)) stays a separate script.
+
 ## Launchers
 
 A launcher runs Reaper on a scratch copy of the developer's configuration (settings, licence and plugin scan), so a run never changes theirs; passes the environment to the script; refuses to start while the developer's Reaper is open; and exits 124 when Reaper hasn't quit within `RUN_TIMEOUT` seconds (default 120).
@@ -35,7 +55,7 @@ This scenario reproduced [Doubler #41](https://github.com/iuri-audio/doubler/iss
 
 ## The script's contract
 
-- **Load [`reaper/prelude.lua`](reaper/prelude.lua)** with `local drive = dofile(os.getenv("PRELUDE"))` and use what it gives: `drive.start(fn)` waits until Reaper can play (playback started in its first seconds stops at once at 0 s); `drive.say(...)` writes a line to `$OUT/result.txt`; `drive.quit()` quits with nothing to save, since quitting a changed project opens a save dialog that someone has to click.
+- **Load [`reaper/prelude.lua`](reaper/prelude.lua)** with `local drive = dofile(os.getenv("PRELUDE"))` and use what it gives: `drive.start(fn)` waits until Reaper can play (playback started in its first seconds stops at once at 0 s); `drive.say(...)` writes a line to `$OUT/result.txt`; `drive.quit()` quits with nothing to save, since quitting a changed project opens a save dialog that someone has to click; `drive.pass`, `drive.fail` and `drive.error` give a check its verdict and quit; `drive.after(seconds, fn)` waits without blocking; `drive.defer(fn)` is `reaper.defer` that turns a Lua error into an ERROR verdict instead of a dialog that holds the run.
 - **Keep files under `$OUT` or the script's folder.** The Flatpak Reaper runs sandboxed, and its launcher only shares those two (and the home folder).
 - **Time with `reaper.defer`,** never by blocking. Reaper only draws and handles windows between deferred calls.
 - **Check that a device change reached Reaper** with `reaper.GetAudioDeviceInfo("SRATE")` and `("BSIZE")`. On Linux, PipeWire's `pw-metadata` settings don't reach it (its JACK client keeps the block size it asked for, and the Deck allows only 48 kHz), so changing the sample rate or block size takes the developer in Reaper's Preferences.

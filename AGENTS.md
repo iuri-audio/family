@@ -6,6 +6,7 @@ Code shared by the family's guitar plugins (Doubler, Quiet, Drop). See `README.m
 - Nothing here may name or assume a particular plugin: take it as a parameter.
 - The editor look and its tokens are in `docs/family-identity.md`; `family-ui` implements it.
 - A bug only a host shows (the editor, automation, transport): reproduce it in Reaper yourself with a ReaScript, following `docs/driving-reaper.md`.
+- Before a plugin bumps its family rev, run `cargo xtask e2e` there (`docs/driving-reaper.md`, *The end-to-end checks*), with `--config ../family/.cargo/local.toml` to try a family change. Test hooks go only in `crates/ui/src/e2e.rs`, behind the `e2e-hooks` feature.
 - Upstream (nice-plug, egui-baseview, baseview): `docs/upstream.md` has the bugs we work around, our baseview fork, and who reports upstream.
 - `family-dsp` is `no_std` without `alloc` (each plugin's ADR on its dsp crate explains why).
 - A change here only reaches a plugin when the plugin bumps its rev. When changing an interface, update both plugins in the same session.

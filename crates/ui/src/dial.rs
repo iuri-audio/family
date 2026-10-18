@@ -273,23 +273,28 @@ impl<'a, P: Param> Dial<'a, P> {
         if response.double_clicked() {
             self.set(&mut state, self.param.default_normalized_value(), now);
         }
-        if response.hovered() {
-            state.scrolled += ui.input(|input| {
-                input
-                    .raw
-                    .events
-                    .iter()
-                    .map(|event| match *event {
-                        Event::MouseWheel {
-                            unit: MouseWheelUnit::Point,
-                            delta,
-                            ..
-                        } => delta.y / POINTS_PER_NOTCH,
-                        Event::MouseWheel { delta, .. } => delta.y,
-                        _ => 0.0,
-                    })
-                    .sum::<f32>()
-            });
+        #[cfg(feature = "e2e-hooks")]
+        let hooked = crate::e2e::wheel_notches(ui, id, now);
+        #[cfg(not(feature = "e2e-hooks"))]
+        let hooked = 0.0;
+        if response.hovered() || hooked != 0.0 {
+            state.scrolled += hooked
+                + ui.input(|input| {
+                    input
+                        .raw
+                        .events
+                        .iter()
+                        .map(|event| match *event {
+                            Event::MouseWheel {
+                                unit: MouseWheelUnit::Point,
+                                delta,
+                                ..
+                            } => delta.y / POINTS_PER_NOTCH,
+                            Event::MouseWheel { delta, .. } => delta.y,
+                            _ => 0.0,
+                        })
+                        .sum::<f32>()
+                });
             let notches = state.scrolled.trunc();
             if notches != 0.0 {
                 state.scrolled -= notches;

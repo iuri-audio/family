@@ -133,7 +133,7 @@ fn roll_back(swapped: &[Swapped]) -> bool {
 }
 
 /// Lists every file under `source` (a file or a folder) with where it goes under `target`.
-fn copy_plan(source: &Path, target: &Path, copies: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {
+pub fn copy_plan(source: &Path, target: &Path, copies: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {
     if source.is_dir() {
         for entry in fs::read_dir(source)? {
             let entry = entry?;

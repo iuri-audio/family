@@ -9,6 +9,8 @@
 
 pub mod canvas;
 pub mod dial;
+#[cfg(feature = "e2e-hooks")]
+mod e2e;
 pub mod glow;
 pub mod lamp;
 pub mod night;
