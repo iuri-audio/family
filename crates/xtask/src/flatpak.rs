@@ -18,12 +18,12 @@ const SDK: &str = "org.freedesktop.Sdk//25.08";
 const RUNTIME_GLIBC: (u32, u32) = (2, 42);
 
 /// Where under the workspace's `target/` the SDK's builds go, apart from native ones.
-const TARGET_SUBDIR: &str = "flatpak-25.08";
+pub const TARGET_SUBDIR: &str = "flatpak-25.08";
 
 /// Builds and bundles inside the SDK with `cargo_args`, then checks the bundle's glibc. Returns
 /// the folder the bundles are in.
 pub fn bundle(root: &Path, name: &str, cargo_args: &[String]) -> Result<PathBuf> {
-    let target_dir = root.join("target").join(TARGET_SUBDIR);
+    let target_dir = target_dir(root, cargo_args);
     let mut script = format!(
         "export PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_TARGET_DIR={}; cd {} && cargo xtask bundle",
         quoted(&target_dir.to_string_lossy()),
@@ -44,6 +44,12 @@ pub fn bundle(root: &Path, name: &str, cargo_args: &[String]) -> Result<PathBuf>
     let bundled = target_dir.join("bundled");
     check_glibc(&bundled.join(format!("{name}.clap")))?;
     Ok(bundled)
+}
+
+/// Use the e2e runner's isolated folder when supplied, otherwise the normal SDK build folder.
+fn target_dir(root: &Path, cargo_args: &[String]) -> PathBuf {
+    crate::cargo_option(cargo_args, "--target-dir")
+        .map_or_else(|| root.join("target").join(TARGET_SUBDIR), PathBuf::from)
 }
 
 /// The plugin folders a Linux host scans in the user's home: `~/.vst3` and `~/.clap`.
@@ -109,6 +115,20 @@ fn quoted(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bundles_are_separate_from_installable_bundles() {
+        let root = Path::new("/plugin");
+        let normal = target_dir(root, &[]);
+        let e2e = root.join("target/e2e").join(TARGET_SUBDIR);
+        let args = vec![
+            "--target-dir".to_owned(),
+            e2e.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(normal, root.join("target").join(TARGET_SUBDIR));
+        assert_eq!(target_dir(root, &args), e2e);
+        assert_ne!(normal, e2e);
+    }
 
     #[test]
     fn the_newest_glibc_is_found_among_the_symbol_versions() {

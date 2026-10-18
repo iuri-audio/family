@@ -290,6 +290,10 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
             .arg(&check.script)
             .arg(format!("PLUGIN_NAME={}", plugin.name))
             .arg(format!("BUILD_TAG={tag}"))
+            .arg(match host {
+                Host::Wsl => "E2E_HOST=wsl",
+                Host::Flatpak => "E2E_HOST=flatpak",
+            })
             .args(&check.env)
             .env(
                 "RUN_TIMEOUT",
@@ -366,8 +370,7 @@ fn checks(plugin: &Plugin<'_>, reaper_dir: &Path) -> Result<Vec<Check>> {
 }
 
 /// The configuration `ini` with every VST3 and CLAP plugin path set to `folder`, so Reaper scans
-/// nothing else. Paths it doesn't set are added for Windows, where their names are known; on
-/// Linux the load check catches a VST3 from elsewhere.
+/// nothing else. Missing paths are added in the Reaper section, overriding the host's defaults.
 fn with_plugin_paths(ini: &[u8], folder: &str, host: Host) -> Vec<u8> {
     let is_path = |line: &[u8]| {
         let key = line.split(|&byte| byte == b'=').next().unwrap_or_default();
@@ -384,16 +387,42 @@ fn with_plugin_paths(ini: &[u8], folder: &str, host: Host) -> Vec<u8> {
             }
         })
         .collect();
-    if host == Host::Wsl {
-        let section = lines
+    let section = lines
+        .iter()
+        .position(|line| line.trim_ascii().eq_ignore_ascii_case(b"[reaper]"))
+        .unwrap_or_else(|| {
+            lines.push(b"[reaper]".to_vec());
+            lines.len() - 1
+        });
+    let keys = match host {
+        Host::Wsl => ["vstpath64", "clap_path_win64"],
+        Host::Flatpak => ["vstpath", "clap_path_linux-x86_64"],
+    };
+    for key in keys {
+        let prefix = format!("{key}=");
+        if !lines.iter().any(|line| line.starts_with(prefix.as_bytes())) {
+            let at = section + 1;
+            lines.insert(at, format!("{prefix}{folder}").into_bytes());
+        }
+    }
+    if host == Host::Flatpak {
+        // Reaper 7.82 adds ~/.vst3 on its first VST3 scan unless this migration bit is set.
+        // With that bit absent, setting the path alone is not enough. Keep every other flag
+        // (837 is Reaper's default without the bit).
+        let at = lines
             .iter()
-            .position(|line| line.trim_ascii() == b"[REAPER]");
-        for key in ["vstpath64", "clap_path_win64"] {
-            let prefix = format!("{key}=");
-            if !lines.iter().any(|line| line.starts_with(prefix.as_bytes())) {
-                let at = section.map_or(lines.len(), |section| section + 1);
-                lines.insert(at, format!("{prefix}{folder}").into_bytes());
-            }
+            .position(|line| line.starts_with(b"vstfullstate="));
+        let flags = at
+            .and_then(|at| lines.get(at))
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .and_then(|line| line.strip_prefix("vstfullstate="))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(837);
+        let setting = format!("vstfullstate={}", flags | 8192).into_bytes();
+        if let Some(line) = at.and_then(|at| lines.get_mut(at)) {
+            *line = setting;
+        } else {
+            lines.insert(section + 1, setting);
         }
     }
     lines.join(&b'\n')
@@ -476,8 +505,40 @@ mod tests {
             String::from_utf8(patched).unwrap(),
             "[REAPER]\nclap_path_win64=C:\\p\nvstpath64=C:\\p\nother=1\n"
         );
-        let patched = with_plugin_paths(b"[REAPER]\nother=1\n", "/p", Host::Flatpak);
-        assert_eq!(String::from_utf8(patched).unwrap(), "[REAPER]\nother=1\n");
+    }
+
+    #[test]
+    fn missing_linux_paths_override_defaults_in_the_reaper_section() {
+        for section in ["[reaper]", "[REAPER]"] {
+            let ini = format!("[.swell]\nscale=1\n{section}\nother=1\n[Recent]\n");
+            let patched = with_plugin_paths(ini.as_bytes(), "/run/plugins", Host::Flatpak);
+            assert_eq!(
+                String::from_utf8(patched).unwrap(),
+                format!(
+                    "[.swell]\nscale=1\n{section}\nvstfullstate=9029\nclap_path_linux-x86_64=/run/plugins\nvstpath=/run/plugins\nother=1\n[Recent]\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_reaper_section_is_created() {
+        let patched = with_plugin_paths(b"[Recent]\nother=1\n", "/p", Host::Flatpak);
+        assert_eq!(
+            String::from_utf8(patched).unwrap(),
+            "[Recent]\nother=1\n\n[reaper]\nvstfullstate=9029\nclap_path_linux-x86_64=/p\nvstpath=/p"
+        );
+    }
+
+    #[test]
+    fn linux_vst3_migration_preserves_the_other_flags() {
+        for flags in [0, 837, 9029, 65535] {
+            let ini = format!("[reaper]\nvstfullstate={flags}\n");
+            let patched = with_plugin_paths(ini.as_bytes(), "/p", Host::Flatpak);
+            let patched = String::from_utf8(patched).unwrap();
+            assert!(patched.contains(&format!("vstfullstate={}\n", flags | 8192)));
+            assert_eq!(patched.matches("vstfullstate=").count(), 1);
+        }
     }
 
     #[test]

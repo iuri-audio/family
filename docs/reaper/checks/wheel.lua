@@ -67,6 +67,10 @@ local function run(index)
   reaper.OnPlayButton()
   local started, moved, closed = reaper.time_precise(), false, false
   local function step()
+    if reaper.time_precise() - started > 1 and reaper.GetPlayState() & 1 == 0 then
+      drive.error(label, ": playback didn't start (is Reaper's audio device working?)")
+      return
+    end
     local value = reaper.TrackFX_GetParamNormalized(track, fx, param)
     if value > FLAT + 0.001 then moved = true end
     if scenario.close and moved and not closed then

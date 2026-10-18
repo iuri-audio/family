@@ -64,6 +64,10 @@ function drive.start(fn)
     if reaper.time_precise() - launched < SETTLE_S then
       drive.defer(wait)
     else
+      local _, rate = reaper.GetAudioDeviceInfo("SRATE")
+      local _, block = reaper.GetAudioDeviceInfo("BSIZE")
+      drive.say("audio: running=", tostring(reaper.Audio_IsRunning()), ", rate=", rate,
+        ", block=", block)
       fn()
     end
   end

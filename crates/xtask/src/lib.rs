@@ -99,17 +99,17 @@ pub fn main(plugin: &Plugin<'_>) -> anyhow::Result<()> {
             // Fail before the build if there is no Reaper to run the checks in.
             let host = e2e::Host::for_build(flatpak, target(&cargo_args))?;
             cargo_args.extend(["--features".to_owned(), e2e::HOOKS_FEATURE.to_owned()]);
-            if !flatpak {
-                // A flatpak build already goes in its own folder.
-                let target_dir = plugin
-                    .workspace_root
-                    .join("target")
-                    .join(e2e::TARGET_SUBDIR);
-                cargo_args.extend([
-                    "--target-dir".to_owned(),
-                    target_dir.to_string_lossy().into_owned(),
-                ]);
+            let mut target_dir = plugin
+                .workspace_root
+                .join("target")
+                .join(e2e::TARGET_SUBDIR);
+            if flatpak {
+                target_dir.push(flatpak::TARGET_SUBDIR);
             }
+            cargo_args.extend([
+                "--target-dir".to_owned(),
+                target_dir.to_string_lossy().into_owned(),
+            ]);
             let bundled = bundle(&cargo_args)?;
             e2e::run(plugin, &bundled, host)
         }
