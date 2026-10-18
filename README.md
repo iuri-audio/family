@@ -6,7 +6,7 @@ Code shared by a family of guitar plugins: Doubler, Quiet and Drop so far. The f
 |---|---|
 | `family-dsp` | `no_std` DSP: the crossover (any number of bands, Linkwitz-Riley, summing flat), the biquad, the audited float↔integer conversions, the click statistic (stereo or mono) and averaging a stereo input to a DI |
 | `family-signals` | Test support, for `[dev-dependencies]`: the synthetic plucks, clicks, notes, sines and seeded noise the plugins' tests play, and their RMS and peak levels |
-| `family-ui` | The editor look, Night (`docs/family-identity.md`): the dial, switch, lamp and glow, the bundled Archivo, and the shared stylesheet in a plugin's colour |
+| `family-ui` | The editor look, Night (`docs/family-identity.md`), in egui on nice-plug: the dial, switch, lamp and glow, the bundled Archivo, the look's colours and sizes, and the evenly scaled canvas with its corner grip |
 | `family-wav` | WAV reading and writing for each plugin's offline `render`, and the `stats`, `split` and `join` commands (also runnable on their own as the `wav` binary) |
 | `family-xtask` | `cargo xtask bundle` and `cargo xtask install`: each plugin's `xtask` is a `main` that calls `family_xtask::main` with its package, bundle name and install folder variable |
 

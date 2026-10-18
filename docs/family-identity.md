@@ -34,17 +34,19 @@ Each plugin's colour comes in three strengths: the colour itself (arc, switch, b
 | Pitch shifter (proposed) | `#f0a43a` | `#ffc56e` | same opacities |
 | Quiet | `#a396ff` | `#c4bbff` | same opacities |
 
-The glow is set in CSS as a `box-shadow`: `0px 0px 18px` on a lit dial's arc, `0px 0px 10px 3px` on the lamp. The views that draw their own shapes read it through `Glow`, since vizia only draws box shadows around a view's box.
+The glows are `night::DIAL_GLOW` on a lit dial's arc (a sigma of 4.5 points) and `night::LAMP_GLOW` on the lamp (a sigma of 2.5 points, the lamp grown by 3 points first). Their widths were chosen by eye to match the vizia build's `box-shadow`s (`0px 0px 18px` and `0px 0px 10px 3px`), which femtovg rendered at a sigma of about a quarter of the blur radius.
 
 ## The shared code
 
-`family-ui` in this repo holds what the plugins share:
+`family-ui` in this repo holds what the plugins share, in egui on nice-plug:
 
-- `night.css`: the panel, the typeface's sizes, the colour bar, the rule, and the components' colours and sizes, with the plugin's colour written in by `stylesheet(Colour)`. vizia's CSS has no variables, so the colour is replaced in the text.
-- `install(cx, Colour)`: loads the bundled Archivo as the default font and adds that stylesheet. A plugin's editor calls it first, then adds its own stylesheet for its layout, which can override anything.
-- `Dial`: the 270° dial, with drag, fine drag, double-click reset, wheel steps and host gestures. Size it in the plugin's stylesheet; the `glow` class lights its arc.
-- `Switch`: the on/off switch.
+- `night`: the tokens above as Rust constants, with the text sizes, the colour bar's height, the lamp's and switch's sizes and the two glows. A plugin's colour is a `Colour { signal, lit }`.
+- `text`: `install(ctx)` loads the bundled Archivo as egui's proportional font, with semi-bold as a named family; `font(size, Weight)` picks a weight. Call `install` from the editor's `build`.
+- `Canvas`: the editor is painted at fixed coordinates on a canvas of the plugin's design size, and egui's zoom (the host's display scale times the user's scale) scales it evenly. It draws the panel, the colour bar and the corner grip, which changes the user's scale live. It also carries the workarounds for egui-baseview's and nice-plug-egui's bugs, each commented with the bug it covers.
+- `EditorScale`: the user's scale, which the plugin saves as a persistent field, in the form vizia's `ViziaState` was saved in.
+- `Dial`: the 270° dial, with drag, fine drag, double-click reset, wheel steps and host gestures. The plugin places and sizes it; `glowing()` lights its arc.
+- `Switch`: the on/off switch, followed by the parameter's name.
 - `Lamp`: the lamp that blinks when a counter the audio thread keeps moves.
-- `Glow`: the blurred glow under a self-drawn shape.
+- `glow`: the shapes as meshes whose vertex alphas follow a cross-section, crisp or blurred. A glow is the shape's cross-section blurred by a Gaussian, worked out analytically, so it needs no texture or blur pass and scales with the editor.
 
-Each takes its colours from the stylesheet and knows nothing about the plugin it's in.
+Each takes the plugin's `Colour` and knows nothing else about the plugin it's in. The layout is each plugin's own `editor.rs`.

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-nih_plug_xtask = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
+nice-plug-xtask = "0.1.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

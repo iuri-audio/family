@@ -1,128 +1,114 @@
-//! A lamp that blinks when a counter the audio thread keeps moves, and fades out after: for an
-//! event the player should see, such as a detected attack. All timing and drawing run on the
-//! editor thread.
+//! A lamp that blinks when a counter the audio thread keeps moves, and fades out after.
 //!
-//! The stylesheet sets its look: `background-color` is the dark lamp, `color` the lit one, and a
-//! `box-shadow` with a blur radius its glow while lit (see [`Glow`]).
+//! It's for an event the player should see, such as a detected attack. All timing and drawing run
+//! on the editor thread, which polls the counter at [`POLL`] while the editor is open.
+//!
+//! Dark, it's [`LAMP_DARK`]; lit, the plugin's lit tint with the [`LAMP_GLOW`] in its colour.
 
-use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use nih_plug_vizia::vizia::{prelude::*, vg};
+use egui::epaint::Mesh;
+use egui::{Pos2, Shape, Ui};
 
-use crate::glow::Glow;
+use crate::Colour;
+use crate::glow::{crisp, disk};
+use crate::night::{LAMP_DARK, LAMP_GLOW, LAMP_RADIUS};
 
 /// How long the lamp takes to fade completely after the counter moves.
 const FADE: Duration = Duration::from_millis(150);
 
-/// A lamp that polls the audio thread's counter at the editor's frame rate.
+/// How often the editor polls the counter while it's open: about once a frame at 60 Hz.
+pub const POLL: Duration = Duration::from_millis(16);
+
+/// A gap between polls longer than this means the editor wasn't drawing (closed, or hidden by the
+/// host), so a change seen after it happened while nobody could see it, and doesn't light the
+/// lamp.
+const STALE: Duration = Duration::from_millis(250);
+
+/// The lamp's brightness `since` seconds after it was lit, from 1 (just lit) to 0 (dark).
+#[must_use]
+pub fn brightness(since: f64) -> f32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the result is clamped to between 0 and 1"
+    )]
+    let brightness = (1.0 - since / FADE.as_secs_f64()).clamp(0.0, 1.0) as f32;
+    brightness
+}
+
+/// A lamp that lights each time its counter changes.
 #[derive(Debug)]
 pub struct Lamp {
-    /// From 0 (dark) to 1 (just lit), as of the last frame.
-    brightness: f32,
-    glow: Glow,
+    /// The audio thread's counter. It only stores to it, with relaxed ordering: the count is the
+    /// whole message.
+    counter: Arc<AtomicU64>,
+    /// The count last seen, and when it was polled, in egui's time in seconds.
+    polled: Option<(u64, f64)>,
+    /// When the lamp was last lit, in egui's time in seconds.
+    lit_at: Option<f64>,
 }
-
-/// The lamp's own model, holding the counter it polls, in its own module so the lint exception
-/// for the code vizia's `Lens` derive generates stays scoped to it.
-#[expect(
-    clippy::expl_impl_clone_on_copy,
-    reason = "vizia's `Lens` derive implements `Clone` by hand on the `Copy` lens types it generates"
-)]
-mod source {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
-
-    use nih_plug_vizia::vizia::prelude::*;
-
-    #[derive(Lens)]
-    pub(super) struct Counter {
-        pub(super) count: Arc<AtomicU64>,
-    }
-
-    impl Model for Counter {}
-}
-
-/// The lamp's brightness as of this frame.
-#[derive(Debug)]
-struct Brightness(f32);
 
 impl Lamp {
-    /// A lamp that lights each time `counter` changes. The audio thread only stores to it, with
-    /// relaxed ordering: the count is the whole message.
-    pub fn new(cx: &mut Context, counter: Arc<AtomicU64>) -> Handle<'_, Self> {
+    /// A lamp that lights each time `counter` changes.
+    #[must_use]
+    pub const fn new(counter: Arc<AtomicU64>) -> Self {
         Self {
-            brightness: 0.0,
-            glow: Glow::default(),
+            counter,
+            polled: None,
+            lit_at: None,
         }
-        .build(cx, |cx| {
-            // Opening an editor must not flash for changes that happened while it was closed.
-            let seen = Cell::new(counter.load(Ordering::Relaxed));
-            let lit_at = Cell::new(None::<Instant>);
-            // vizia's timers never fire under the baseview backend plugins run on, but it re-reads
-            // every lens bound to a model on every frame. So the polling lives in a lens, like
-            // nih_plug_vizia's peak meter, and the binding only fires while the brightness
-            // changes: on a change and through its fade.
-            let brightness = source::Counter::count.map(move |count| {
-                let count = count.load(Ordering::Relaxed);
-                if count != seen.get() {
-                    seen.set(count);
-                    lit_at.set(Some(Instant::now()));
-                }
-                lit_at.get().map_or(0.0, |at| {
-                    (1.0 - at.elapsed().as_secs_f32() / FADE.as_secs_f32()).max(0.0)
-                })
-            });
-            source::Counter { count: counter }.build(cx);
-            Binding::new(cx, brightness, |cx, brightness| {
-                let brightness = brightness.get(cx);
-                cx.emit(Brightness(brightness));
-            });
-        })
+    }
+
+    /// Polls the counter and draws the lamp around `centre`, then asks egui to draw again in time
+    /// for the next poll, or the next step of the fade.
+    pub fn show(&mut self, ui: &Ui, centre: Pos2, colour: Colour) {
+        let now = ui.input(|input| input.time);
+        let count = self.counter.load(Ordering::Relaxed);
+        if let Some((seen, at)) = self.polled
+            && count != seen
+            && now - at <= STALE.as_secs_f64()
+        {
+            self.lit_at = Some(now);
+        }
+        self.polled = Some((count, now));
+        let brightness = self.lit_at.map_or(0.0, |at| brightness(now - at));
+        if brightness > 0.0 {
+            ui.ctx().request_repaint();
+        } else {
+            ui.ctx().request_repaint_after(POLL);
+        }
+
+        let feather = 1.0 / ui.ctx().pixels_per_point();
+        let mut mesh = Mesh::default();
+        if brightness > 0.0 {
+            disk(
+                &mut mesh,
+                centre,
+                &LAMP_GLOW.profile(LAMP_RADIUS),
+                colour.signal.gamma_multiply(LAMP_GLOW.opacity * brightness),
+            );
+        }
+        disk(
+            &mut mesh,
+            centre,
+            &crisp(LAMP_RADIUS, feather),
+            LAMP_DARK.lerp_to_gamma(colour.lit, brightness),
+        );
+        ui.painter().add(Shape::mesh(mesh));
     }
 }
 
-impl View for Lamp {
-    fn element(&self) -> Option<&'static str> {
-        Some("lamp")
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
-        event.map(|&Brightness(brightness), meta| {
-            self.brightness = brightness;
-            cx.needs_redraw();
-            meta.consume();
-        });
-    }
-
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
-        let brightness = self.brightness;
-        let bounds = cx.bounds();
-        let circle = |grow: f32| {
-            let mut path = vg::Path::new();
-            path.circle(
-                bounds.x + bounds.w / 2.0,
-                bounds.y + bounds.h / 2.0,
-                bounds.w.min(bounds.h) / 2.0 + grow,
-            );
-            path
-        };
-        self.glow
-            .draw(cx, canvas, brightness, |canvas, paint, spread| {
-                canvas.fill_path(&circle(spread), paint);
-            });
-        let path = circle(0.0);
-        let dark: vg::Color = cx.background_color().into();
-        let lit: vg::Color = cx.font_color().into();
-        let mix = |from: f32, to: f32| (to - from).mul_add(brightness, from);
-        let color = vg::Color::rgbaf(
-            mix(dark.r, lit.r),
-            mix(dark.g, lit.g),
-            mix(dark.b, lit.b),
-            mix(dark.a, lit.a),
-        );
-        canvas.fill_path(&path, &vg::Paint::color(color));
+    #[test]
+    fn the_lamp_fades_from_full_to_dark_over_150_ms() {
+        assert!((brightness(0.0) - 1.0).abs() < 1e-6);
+        assert!((brightness(0.075) - 0.5).abs() < 1e-6);
+        assert!(brightness(0.15).abs() < 1e-6);
+        assert!(brightness(10.0).abs() < 1e-6);
     }
 }

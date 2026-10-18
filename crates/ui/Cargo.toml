@@ -1,14 +1,19 @@
 [package]
 name        = "family-ui"
-description = "The family's editor look (Night): the dial, switch, lamp and glow, the bundled typeface, and the shared stylesheet."
+description = "The family's editor look (Night) in egui: the dial, switch, lamp and glow, the bundled typeface, the look's colours and sizes, and the evenly scaled canvas with its corner grip."
 version     = "0.1.0"
 edition.workspace    = true
 publish.workspace    = true
 repository.workspace = true
 
 [dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
-nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
+egui = { version = "0.36.1", default-features = false }
+nice-plug = { version = "0.4.2", default-features = false, features = ["editor"] }
+nice-plug-egui = "0.5.1"
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.145"
 
 [lints]
 workspace = true
