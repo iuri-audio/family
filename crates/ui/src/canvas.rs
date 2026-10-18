@@ -88,7 +88,11 @@ impl Canvas {
 
     /// Starts measuring the host's scale afresh for a newly opened window. Call it from the
     /// editor's `build`, since `editor_closed` is never called (bug 1).
-    pub const fn opened(&mut self) {
+    ///
+    /// It logs the opening before the window draws anything, so an editor that never draws shows
+    /// in the log as an opening with no "opened at" line after it.
+    pub fn opened(&mut self) {
+        nice_log!("family-ui: editor window built, waiting for its first frame");
         self.missed_scale = 1.0;
         self.opening = Some(0);
         self.settling = false;
