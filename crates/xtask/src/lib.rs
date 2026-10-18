@@ -7,19 +7,26 @@
 //! cargo xtask bundle --release                                   # native (Linux)
 //! cargo xtask bundle --release --target x86_64-pc-windows-msvc   # Windows, via cargo-xwin
 //! cargo xtask install --release --target x86_64-pc-windows-msvc  # bundle, then install
+//! cargo xtask install --flatpak --release                         # for Flathub's Reaper
 //! ```
 //!
-//! Any arguments after `bundle` or `install` go to `cargo build`. A Windows MSVC target built from
-//! another OS goes through `cargo xwin build`, which supplies the MSVC headers, libraries and
-//! linker.
+//! Any arguments after `bundle` or `install` go to `cargo build`, apart from `--flatpak`. A Windows
+//! MSVC target built from another OS goes through `cargo xwin build`, which supplies the MSVC
+//! headers, libraries and linker.
 //!
 //! `install` copies `<Name>.vst3` and `<Name>.clap` into the `VST3/` and `CLAP/` folders under the
 //! directory in the plugin's environment variable.
+//!
+//! `--flatpak` builds for a Linux host installed from Flathub, such as Reaper: inside the SDK of
+//! the runtime it runs on, into `target/flatpak-25.08/`, refusing a build that needs a newer glibc
+//! than the runtime has. With `install`, it installs into `~/.vst3` and `~/.clap`, so it needs no
+//! environment variable.
 //!
 //! This wraps `nice_plug_xtask::bundle` instead of using `nice_plug_xtask::main`, because `main`
 //! takes the outermost directory with a `Cargo.toml` as the workspace root, which is the wrong
 //! one when a plugin's repo is checked out inside another (as git worktrees under `.claude/` are).
 
+mod flatpak;
 mod install;
 
 use std::path::{Path, PathBuf};
@@ -42,8 +49,8 @@ pub struct Plugin<'a> {
     pub workspace_root: &'a Path,
 }
 
-const USAGE: &str = "usage: cargo xtask bundle|install [cargo build arguments, e.g. --release \
-                     --target <triple>]";
+const USAGE: &str = "usage: cargo xtask bundle|install [--flatpak] [cargo build arguments, e.g. \
+                     --release --target <triple>]";
 
 /// Runs `bundle` or `install` for `plugin`, with the arguments the process was started with.
 ///
@@ -53,18 +60,31 @@ const USAGE: &str = "usage: cargo xtask bundle|install [cargo build arguments, e
 pub fn main(plugin: &Plugin<'_>) -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next();
-    let cargo_args: Vec<String> = args.collect();
+    let mut cargo_args: Vec<String> = args.collect();
+    let flatpak = cargo_args.iter().any(|arg| arg == "--flatpak");
+    cargo_args.retain(|arg| arg != "--flatpak");
+    let bundle = |cargo_args: &[String]| {
+        if flatpak {
+            flatpak::bundle(plugin.workspace_root, plugin.name, cargo_args)
+        } else {
+            bundle(plugin, cargo_args)
+        }
+    };
     match command.as_deref() {
         Some("bundle") => {
-            bundle(plugin, &cargo_args)?;
+            bundle(&cargo_args)?;
             Ok(())
         }
         Some("install") => {
             // Fail before the build if there is nowhere to install to.
-            let variable = plugin.install_dir_variable;
-            let plugin_dir = install::plugin_dir(std::env::var_os(variable), variable)?;
-            let bundled = bundle(plugin, &cargo_args)?;
-            let installed = install::install(&bundled, &plugin_dir, plugin.name)?;
+            let folders = if flatpak {
+                flatpak::plugin_folders()?
+            } else {
+                let variable = plugin.install_dir_variable;
+                install::folders_under(&install::plugin_dir(std::env::var_os(variable), variable)?)
+            };
+            let bundled = bundle(&cargo_args)?;
+            let installed = install::install(&bundled, &folders, plugin.name)?;
             print_installed(plugin.workspace_root, &cargo_args, &installed);
             Ok(())
         }

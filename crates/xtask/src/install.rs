@@ -27,25 +27,25 @@ pub fn plugin_dir(value: Option<OsString>, variable: &str) -> Result<PathBuf> {
     }
 }
 
-/// The bundles named `name`, each with the subfolder of the plugin folder it goes in.
-fn bundles(name: &str) -> [(String, &'static str); 2] {
-    [
-        (format!("{name}.vst3"), "VST3"),
-        (format!("{name}.clap"), "CLAP"),
-    ]
+/// The VST3 and CLAP folders under the plugin folder `plugin_dir`: `VST3/` and `CLAP/`.
+pub fn folders_under(plugin_dir: &Path) -> [PathBuf; 2] {
+    [plugin_dir.join("VST3"), plugin_dir.join("CLAP")]
 }
 
-/// Copies the bundles named `name` from `bundled` into their subfolders of `plugin_dir`, replacing
-/// what is there. Returns the installed bundles' paths.
+/// Copies the bundles named `name` from `bundled` into `folders`, the VST3 folder and the CLAP
+/// folder, replacing what is there. Returns the installed bundles' paths.
 ///
 /// If a file it would replace can't be written, which is what a host holding the plugin open
 /// looks like, it fails without changing anything.
-pub fn install(bundled: &Path, plugin_dir: &Path, name: &str) -> Result<Vec<PathBuf>> {
+pub fn install(bundled: &Path, folders: &[PathBuf; 2], name: &str) -> Result<Vec<PathBuf>> {
     let mut copies = Vec::new();
     let mut installed = Vec::new();
-    for (bundle, folder) in bundles(name) {
-        let source = bundled.join(&bundle);
-        let target = plugin_dir.join(folder).join(&bundle);
+    for (bundle, folder) in [format!("{name}.vst3"), format!("{name}.clap")]
+        .iter()
+        .zip(folders)
+    {
+        let source = bundled.join(bundle);
+        let target = folder.join(bundle);
         copy_plan(&source, &target, &mut copies)
             .with_context(|| format!("can't read the bundle {}", source.display()))?;
         installed.push(target);
@@ -237,7 +237,7 @@ mod tests {
         let bundled = bundle(dir.path(), "new");
         let plugins = dir.path().join("Plugins");
 
-        let installed = install(&bundled, &plugins, "Fake").unwrap();
+        let installed = install(&bundled, &folders_under(&plugins), "Fake").unwrap();
 
         assert_eq!(
             installed,
@@ -258,9 +258,9 @@ mod tests {
     fn replaces_an_installed_build() {
         let dir = tempfile::tempdir().unwrap();
         let plugins = dir.path().join("Plugins");
-        install(&bundle(dir.path(), "old"), &plugins, "Fake").unwrap();
+        install(&bundle(dir.path(), "old"), &folders_under(&plugins), "Fake").unwrap();
 
-        install(&bundle(dir.path(), "new"), &plugins, "Fake").unwrap();
+        install(&bundle(dir.path(), "new"), &folders_under(&plugins), "Fake").unwrap();
 
         assert_eq!(read(&plugins.join(INSTALLED_VST3)), "vst3 new");
         assert_eq!(read(&plugins.join(INSTALLED_CLAP)), "clap new");
@@ -273,12 +273,13 @@ mod tests {
         for locked in [INSTALLED_VST3, INSTALLED_CLAP] {
             let dir = tempfile::tempdir().unwrap();
             let plugins = dir.path().join("Plugins");
-            install(&bundle(dir.path(), "old"), &plugins, "Fake").unwrap();
+            install(&bundle(dir.path(), "old"), &folders_under(&plugins), "Fake").unwrap();
             let mut permissions = fs::metadata(plugins.join(locked)).unwrap().permissions();
             permissions.set_readonly(true);
             fs::set_permissions(plugins.join(locked), permissions).unwrap();
 
-            let error = install(&bundle(dir.path(), "new"), &plugins, "Fake").unwrap_err();
+            let error =
+                install(&bundle(dir.path(), "new"), &folders_under(&plugins), "Fake").unwrap_err();
 
             let message = format!("{error:#}");
             assert!(
@@ -303,14 +304,15 @@ mod tests {
     fn a_rename_that_fails_after_the_checks_puts_the_installed_build_back() {
         let dir = tempfile::tempdir().unwrap();
         let plugins = dir.path().join("Plugins");
-        install(&bundle(dir.path(), "old"), &plugins, "Fake").unwrap();
+        install(&bundle(dir.path(), "old"), &folders_under(&plugins), "Fake").unwrap();
         // The CLAP can be written, so it passes the check, but the name it would be moved aside
         // to is taken by a folder, so moving it fails after the VST3 has already been replaced.
         let blocker = plugins.join("CLAP/.Fake.clap.previous");
         fs::create_dir_all(&blocker).unwrap();
         fs::write(blocker.join("in the way"), "").unwrap();
 
-        let error = install(&bundle(dir.path(), "new"), &plugins, "Fake").unwrap_err();
+        let error =
+            install(&bundle(dir.path(), "new"), &folders_under(&plugins), "Fake").unwrap_err();
 
         let message = format!("{error:#}");
         assert!(
@@ -337,7 +339,7 @@ mod tests {
         fs::remove_file(bundled.join("Fake.clap")).unwrap();
         let plugins = dir.path().join("Plugins");
 
-        let error = install(&bundled, &plugins, "Fake").unwrap_err();
+        let error = install(&bundled, &folders_under(&plugins), "Fake").unwrap_err();
 
         assert!(format!("{error:#}").contains("Fake.clap"), "{error:#}");
         assert!(!plugins.exists());
