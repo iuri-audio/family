@@ -5,8 +5,8 @@
 //! times the user's [`EditorScale`], which the corner grip changes live and the plugin saves.
 //!
 //! Most of this works around bugs in egui-baseview 0.7 and nice-plug-egui 0.5, each commented
-//! where it's handled so it can go once fixed upstream (`UPSTREAM-CONTRIBUTIONS.md` beside the
-//! repos has the details):
+//! where it's handled so it can go once fixed upstream (`docs/upstream.md` says when to revisit
+//! them):
 //!
 //! 1. nice-plug-egui never calls `NiceEguiApp::editor_closed`, so per-window state is reset in
 //!    `build` instead, through [`Canvas::opened`].
