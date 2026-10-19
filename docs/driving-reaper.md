@@ -49,6 +49,8 @@ For scripts that need media files staged on the Windows drive, use `bash reaper/
 
 `reaper/align-onsets.py` is a detector-independent aligner for ordered onset sequences. It accepts a detector executable and arguments, expects one output line per detection in the form `<seconds> s (sample <n>), late <milliseconds> ms`, and writes paired offset summaries and unmatched counts. Use `--reference-pair LABEL LEFT.wav RIGHT.wav` for additional pairs not staged under `$OUT/input`.
 
+`reaper/octave-balance.py` compares WAV files' levels octave by octave against the first one, in dB, to show whether a render is darker or brighter than its DI or a reference render: `python3 -I reaper/octave-balance.py <di.wav> <render.wav>...`. Each level is averaged over the whole file, so compare files of about the same length. It needs numpy and scipy.
+
 ## Saved projects and new instances (Windows)
 
 Reopening one instance can pass while a newly added instance opens cropped. [`reaper/new-instance.lua`](reaper/new-instance.lua) saves one instance, closes and reloads its project, opens that saved instance, then adds three new instances and opens each twice. It plays no audio. [`reaper/run-wsl-new-instance.sh`](reaper/run-wsl-new-instance.sh) runs it alongside the Windows checker, waiting for a physical host/canvas measurement at each step before closing that window.
