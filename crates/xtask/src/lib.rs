@@ -54,6 +54,10 @@ pub struct Plugin<'a> {
     pub install_dir_variable: &'a str,
     /// The plugin's workspace root, where the build runs: the folder above its `xtask` crate.
     pub workspace_root: &'a Path,
+    /// Whether the plugin has an editor of its own, on `family-ui`. Without one, `e2e` builds
+    /// without the test hooks (the plugin needs no `e2e-hooks` feature), skips the checks that
+    /// need an editor, and the others leave out their editor steps.
+    pub editor: bool,
 }
 
 const USAGE: &str = "usage: cargo xtask bundle|install|e2e [--flatpak] [cargo build arguments, e.g. \
@@ -98,7 +102,9 @@ pub fn main(plugin: &Plugin<'_>) -> anyhow::Result<()> {
         Some("e2e") => {
             // Fail before the build if there is no Reaper to run the checks in.
             let host = e2e::Host::for_build(flatpak, target(&cargo_args))?;
-            cargo_args.extend(["--features".to_owned(), e2e::HOOKS_FEATURE.to_owned()]);
+            if plugin.editor {
+                cargo_args.extend(["--features".to_owned(), e2e::HOOKS_FEATURE.to_owned()]);
+            }
             let mut target_dir = plugin
                 .workspace_root
                 .join("target")

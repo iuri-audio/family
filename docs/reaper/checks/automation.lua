@@ -1,13 +1,17 @@
 -- A check run by `cargo xtask e2e` (see ../../driving-reaper.md): in each format, with the editor
 -- open, a parameter follows the host's automation through playback and settles once playback
--- stops. An editor that sends back stale values pulls it off the ramp.
+-- stops. An editor that sends back stale values pulls it off the ramp. A plugin without an editor
+-- runs it with none open. A format whose host won't automate the parameter, as CLAP Reaper won't
+-- one the plugin marks not automatable, is left out; with none left, or no parameters, it skips.
 --
 -- Environment (set by `cargo xtask e2e`):
 --   PLUGIN_NAME  the plugin's name, e.g. "Doubler"
+--   PLUGIN_EDITOR  "1" if the plugin has an editor of its own, "0" if not
 --   PARAM        optional: the parameter to exercise, as the host names it (a continuous one)
 
 local drive = dofile(os.getenv("PRELUDE"))
 local NAME = os.getenv("PLUGIN_NAME")
+local EDITOR = os.getenv("PLUGIN_EDITOR") ~= "0"
 
 local formats = { "VST3", "CLAP" }
 -- The ramp: from FROM at 0 s to TO at RAMP_S.
@@ -22,6 +26,8 @@ local TOLERANCE = 0.1
 local SKIP_S = 0.3
 
 local track, fx, param, env
+-- The formats that ran the ramp.
+local automated = 0
 
 local function value() return reaper.TrackFX_GetParamNormalized(track, fx, param) end
 
@@ -31,7 +37,12 @@ local function next_format(index)
   if track then reaper.DeleteTrack(track) end
   local format = formats[index]
   if not format then
-    drive.pass("both formats followed the automation with the editor open")
+    if automated == 0 then
+      drive.skip(NAME, " has no parameter the host will automate")
+    else
+      drive.pass(automated, " of ", #formats, " formats followed the automation",
+        EDITOR and " with the editor open" or "")
+    end
     return
   end
   reaper.InsertTrackAtIndex(0, false)
@@ -48,16 +59,26 @@ function check_format(index, format)
   local name
   param, name = drive.param(track, fx)
   if not param then
-    drive.error(format, ": no parameter ", os.getenv("PARAM") or "at all")
+    if os.getenv("PARAM") then
+      drive.error(format, ": no parameter ", os.getenv("PARAM"))
+    else
+      drive.skip(NAME, " has no parameter to automate")
+    end
     return
   end
   env = reaper.GetFXEnvelope(track, fx, param, true)
+  if not env then
+    drive.say(format, ": the host won't automate ", name, "; left out")
+    next_format(index + 1)
+    return
+  end
+  automated = automated + 1
   reaper.DeleteEnvelopePointRange(env, -1, 1e9)
   reaper.InsertEnvelopePoint(env, 0, FROM, 0, 0, false, true)
   reaper.InsertEnvelopePoint(env, RAMP_S, TO, 0, 0, false, true)
   reaper.Envelope_SortPoints(env)
   reaper.SetTrackAutomationMode(track, 1) -- read
-  reaper.TrackFX_Show(track, fx, 3)
+  if EDITOR then reaper.TrackFX_Show(track, fx, 3) end
 
   drive.after(1.5, function()
     reaper.SetEditCurPos(0, false, false)

@@ -1,4 +1,5 @@
 -- e2e-env: FAMILY_E2E_WHEEL=8
+-- e2e-needs: editor
 --
 -- A check run by `cargo xtask e2e` (see ../../driving-reaper.md), needing the e2e build's wheel
 -- hook (crates/ui/src/e2e.rs), which the line above turns on: in touch mode, during playback,

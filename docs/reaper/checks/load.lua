@@ -1,9 +1,11 @@
 -- A check run by `cargo xtask e2e` (see ../../driving-reaper.md): in each format, the plugin
 -- under test loads, its editor opens, a parameter the host sets stays set while the editor is
--- open, and the editor opens again with the value kept.
+-- open, and the editor opens again with the value kept. For a plugin without an editor, only the
+-- loading and the parameter staying set; for one without parameters, only the loading.
 --
 -- Environment (set by `cargo xtask e2e`):
 --   PLUGIN_NAME  the plugin's name, e.g. "Doubler"
+--   PLUGIN_EDITOR  "1" if the plugin has an editor of its own, "0" if not
 --   BUILD_TAG    a folder name in the path of the build under test, so a VST3 loaded from
 --                anywhere else fails the check
 --   E2E_HOST     "flatpak" or "wsl": the runner's host, for the Linux CLAP library check
@@ -11,9 +13,12 @@
 
 local drive = dofile(os.getenv("PRELUDE"))
 local NAME, TAG = os.getenv("PLUGIN_NAME"), os.getenv("BUILD_TAG")
+local EDITOR = os.getenv("PLUGIN_EDITOR") ~= "0"
 
 local formats = { "VST3", "CLAP" }
 local track, fx, param
+-- Whether any format had a parameter to set.
+local set_any = false
 
 -- nice-plug's wrappers apply a host's change once the plugin has taken it (VST3 while
 -- processing), so a value set is read back after this long.
@@ -57,7 +62,13 @@ local function next_format(index)
   if track then reaper.DeleteTrack(track) end
   local format = formats[index]
   if not format then
-    drive.pass("both formats loaded, opened, kept a host change and reopened")
+    if not set_any then
+      drive.pass("both formats loaded (no parameters)")
+    elseif EDITOR then
+      drive.pass("both formats loaded, opened, kept a host change and reopened")
+    else
+      drive.pass("both formats loaded and kept a host change (no editor)")
+    end
     return
   end
   reaper.InsertTrackAtIndex(0, false)
@@ -81,13 +92,19 @@ function check_format(index, format)
   local name
   param, name = drive.param(track, fx)
   if not param then
-    drive.error(format, ": no parameter ", os.getenv("PARAM") or "at all")
+    if os.getenv("PARAM") then
+      drive.error(format, ": no parameter ", os.getenv("PARAM"))
+    else
+      drive.say(format, ": no parameters; only loading checked")
+      next_format(index + 1)
+    end
     return
   end
+  set_any = true
 
-  reaper.TrackFX_Show(track, fx, 3)
-  drive.after(1.5, function()
-    if not window() then
+  if EDITOR then reaper.TrackFX_Show(track, fx, 3) end
+  drive.after(EDITOR and 1.5 or 0.5, function()
+    if EDITOR and not window() then
       drive.fail(format, ": the editor did not open")
       return
     end
@@ -96,7 +113,8 @@ function check_format(index, format)
     drive.after(APPLY_S, function() low = value() end)
     drive.after(APPLY_S + 1, function()
       if not near(value(), low) then
-        drive.fail(format, ": ", name, " was set to ", low, " but the open editor moved it to ", value())
+        drive.fail(format, ": ", name, " was set to ", low, " but ", EDITOR and "the open editor" or "it",
+          " moved it to ", value())
         return
       end
       reaper.TrackFX_SetParamNormalized(track, fx, param, 0.75)
@@ -109,6 +127,11 @@ function check_high(index, format, name, low)
   local high = value()
   if near(high, low) then
     drive.fail(format, ": ", name, " did not change from ", low)
+    return
+  end
+  if not EDITOR then
+    drive.say(format, ": ", name, " ", low, " -> ", high, " kept")
+    next_format(index + 1)
     return
   end
   reaper.TrackFX_Show(track, fx, 2)
