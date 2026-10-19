@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use family_dsp::convert::{count_to_f64, f64_to_f32, sample_to_seconds};
-use family_dsp::largest_jump;
+use family_dsp::{Jump, largest_jump};
 
 use crate::read_channels;
 
@@ -39,17 +39,7 @@ pub fn run(args: &Args) -> Result<()> {
             sample_to_seconds(length, spec.sample_rate)
         )?;
         for (index, samples) in channels.iter().enumerate() {
-            let jump = largest_jump(samples, samples).map_or_else(
-                || "none (shorter than two samples)".to_owned(),
-                |jump| {
-                    format!(
-                        "{:.6} at {:.6} s (sample {})",
-                        jump.size,
-                        sample_to_seconds(jump.sample, spec.sample_rate),
-                        jump.sample
-                    )
-                },
-            );
+            let jump = describe_jump(largest_jump(samples, samples), spec.sample_rate);
             writeln!(
                 out,
                 "  {}: peak {:.3} dBFS, rms {:.3} dBFS, largest jump {jump}",
@@ -98,4 +88,20 @@ fn rms(samples: &[f32]) -> f32 {
 /// A level relative to full scale, in dB; silence is `-inf`.
 fn to_db(level: f32) -> f32 {
     20.0 * level.log10()
+}
+
+/// The click statistic as the reports print it: the jump's size, and its time and sample.
+#[must_use]
+pub fn describe_jump(jump: Option<Jump>, sample_rate: u32) -> String {
+    jump.map_or_else(
+        || "none (shorter than two samples)".to_owned(),
+        |jump| {
+            format!(
+                "{:.6} at {:.6} s (sample {})",
+                jump.size,
+                sample_to_seconds(jump.sample, sample_rate),
+                jump.sample
+            )
+        },
+    )
 }

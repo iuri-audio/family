@@ -7,6 +7,9 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use family_dsp::Jump;
+use family_wav::stats::describe_jump;
+
 fn write_wav<S: hound::Sample + Copy>(path: &Path, spec: hound::WavSpec, samples: &[S]) {
     let mut writer = hound::WavWriter::create(path, spec).unwrap();
     for &sample in samples {
@@ -174,5 +177,26 @@ fn a_missing_file_is_an_error_naming_it() {
         String::from_utf8(output.stderr)
             .unwrap()
             .contains("nowhere.wav")
+    );
+}
+
+#[test]
+fn a_jump_is_described_with_its_time() {
+    let jump = Jump {
+        size: 0.5,
+        sample: 24_000,
+    };
+
+    assert_eq!(
+        describe_jump(Some(jump), 48_000),
+        "0.500000 at 0.500000 s (sample 24000)"
+    );
+}
+
+#[test]
+fn no_jump_is_described_as_too_short_a_signal() {
+    assert_eq!(
+        describe_jump(None, 48_000),
+        "none (shorter than two samples)"
     );
 }
