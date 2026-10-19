@@ -27,7 +27,7 @@ end
 
 local finished = false
 
--- Writes `verdict` (PASS, FAIL or ERROR) and a reason to $OUT/verdict.txt and result.txt, then
+-- Writes `verdict` (PASS, FAIL, ERROR or SKIP) and a reason to $OUT/verdict.txt and result.txt, then
 -- quits. Only the first verdict counts.
 local function conclude(verdict, ...)
   if finished then return end
@@ -47,6 +47,9 @@ function drive.fail(...) conclude("FAIL", ...) end
 
 -- The check couldn't run, so it says nothing about the plugin, e.g. Reaper has no audio device.
 function drive.error(...) conclude("ERROR", ...) end
+
+-- The check doesn't apply to this plugin, e.g. it has no parameter to automate.
+function drive.skip(...) conclude("SKIP", ...) end
 
 -- Like reaper.defer, but a Lua error ends the run with an ERROR verdict instead of opening
 -- Reaper's error dialog, which would hold the run until the launcher's timeout.
@@ -84,17 +87,24 @@ function drive.after(seconds, fn)
 end
 
 -- The index and name of the parameter a check exercises: the one named in $PARAM, else the first
--- continuous one (a stepped one can't follow a ramp), else the first.
+-- continuous one (a stepped one can't follow a ramp), else the first. Only the plugin's own
+-- parameters count: never Reaper's (bypass, wet, delta), nor one Reaper can't read, such as a
+-- hidden one in VST3, which reads as NaN. `nil` if there is none.
 function drive.param(track, fx)
+  local hosts = {}
+  for _, ident in ipairs({ ":bypass", ":wet", ":delta" }) do
+    hosts[reaper.TrackFX_GetParamFromIdent(track, fx, ident)] = true
+  end
   local wanted, first = os.getenv("PARAM"), nil
   for index = 0, reaper.TrackFX_GetNumParams(track, fx) - 1 do
     local _, name = reaper.TrackFX_GetParamName(track, fx, index)
+    local value = reaper.TrackFX_GetParamNormalized(track, fx, index)
     if wanted then
       if name == wanted then return index, name end
-    elseif not reaper.TrackFX_GetParameterStepSizes(track, fx, index) then
-      return index, name
+    elseif not hosts[index] and value == value then
+      if not reaper.TrackFX_GetParameterStepSizes(track, fx, index) then return index, name end
+      first = first or index
     end
-    first = first or index
   end
   if wanted or not first then return nil end
   return first, select(2, reaper.TrackFX_GetParamName(track, fx, first))

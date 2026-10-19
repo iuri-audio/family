@@ -7,9 +7,10 @@
 //! only that folder's copy of the bundles, so the check loads the build under test and nothing
 //! the developer has installed is touched.
 //!
-//! A check ends with a verdict from `prelude.lua`: PASS, FAIL (the plugin misbehaved) or ERROR
-//! (the check couldn't run). A run that leaves no verdict, such as one the launcher timed out,
-//! is broken, like an ERROR: neither says anything about the plugin.
+//! A check ends with a verdict from `prelude.lua`: PASS, FAIL (the plugin misbehaved), ERROR
+//! (the check couldn't run) or SKIP (it doesn't apply to the plugin). A run that leaves no verdict,
+//! such as one the launcher timed out, is broken, like an ERROR: neither says anything about the
+//! plugin.
 
 use std::fmt;
 use std::fs;
@@ -65,6 +66,9 @@ pub const TARGET_SUBDIR: &str = "e2e";
 /// How a check's leading comments ask for environment variables for the plugin, such as a hook's:
 /// `-- e2e-env: KEY=VALUE`.
 const ENV_PREFIX: &str = "-- e2e-env: ";
+
+/// How a check's leading comments say it can only run on a plugin with an editor.
+const NEEDS_EDITOR: &str = "-- e2e-needs: editor";
 
 /// Where a plugin keeps its own checks, under its workspace root.
 const PLUGIN_CHECKS: &str = "tests/reaper";
@@ -184,6 +188,8 @@ pub enum Outcome {
     Fail(String),
     /// The check couldn't run, or left no verdict, so it says nothing about the plugin.
     Broken(String),
+    /// The check doesn't apply to the plugin, such as one needing an editor on a plugin without.
+    Skipped(String),
 }
 
 impl fmt::Display for Outcome {
@@ -192,6 +198,7 @@ impl fmt::Display for Outcome {
             Self::Pass => write!(f, "PASS"),
             Self::Fail(reason) => write!(f, "FAIL    {reason}"),
             Self::Broken(reason) => write!(f, "BROKEN  {reason}"),
+            Self::Skipped(reason) => write!(f, "SKIP    {reason}"),
         }
     }
 }
@@ -207,6 +214,7 @@ fn outcome(verdict: Option<&str>, status: Option<i32>) -> Outcome {
             "PASS" => Outcome::Pass,
             "FAIL" => Outcome::Fail(reason),
             "ERROR" => Outcome::Broken(reason),
+            "SKIP" => Outcome::Skipped(reason),
             _ => Outcome::Broken(format!("unknown verdict {word:?}")),
         };
     }
@@ -217,26 +225,36 @@ fn outcome(verdict: Option<&str>, status: Option<i32>) -> Outcome {
     })
 }
 
-/// A check: its name, the script, written into the run's folder, and the environment its
-/// header asks for.
+/// A check: its name, the script, written into the run's folder, the environment its header
+/// asks for, and whether its header says it needs an editor.
 struct Check {
     name: String,
     script: PathBuf,
     env: Vec<String>,
+    needs_editor: bool,
+}
+
+/// The leading comment lines of a check's script.
+fn header(script: &str) -> impl Iterator<Item = &str> {
+    script.lines().take_while(|line| line.starts_with("--"))
 }
 
 /// The `KEY=VALUE` pairs a script's leading comments ask for.
 fn env_of(script: &str) -> Vec<String> {
-    script
-        .lines()
-        .take_while(|line| line.starts_with("--"))
+    header(script)
         .filter_map(|line| line.strip_prefix(ENV_PREFIX))
         .map(|pair| pair.trim().to_owned())
         .collect()
 }
 
+/// Whether a script's leading comments say it needs an editor.
+fn needs_editor(script: &str) -> bool {
+    header(script).any(|line| line.trim_end() == NEEDS_EDITOR)
+}
+
 /// Runs every check against the bundles in `bundled` in `host`'s Reaper, printing each outcome.
-/// Fails unless they all pass.
+/// Fails unless they all pass, but for the checks that need an editor, which a plugin without one
+/// skips.
 pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -260,8 +278,14 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
         checks.len(),
         run_dir.display()
     ));
-    let mut failed = 0;
+    let (mut failed, mut skipped) = (0, 0);
     for check in &checks {
+        if check.needs_editor && !plugin.editor {
+            skipped += 1;
+            let outcome = Outcome::Skipped("needs an editor".to_owned());
+            print(&format!("{:<12} {outcome}", check.name));
+            continue;
+        }
         let out = run_dir.join(&check.name);
         let plugins = out.join("plugins");
         let mut copies = Vec::new();
@@ -290,6 +314,7 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
             .arg(&check.script)
             .arg(format!("PLUGIN_NAME={}", plugin.name))
             .arg(format!("BUILD_TAG={tag}"))
+            .arg(format!("PLUGIN_EDITOR={}", u8::from(plugin.editor)))
             .arg(match host {
                 Host::Wsl => "E2E_HOST=wsl",
                 Host::Flatpak => "E2E_HOST=flatpak",
@@ -303,20 +328,26 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
             .context("could not run bash")?;
         let verdict = fs::read_to_string(out.join("verdict.txt")).ok();
         let outcome = outcome(verdict.as_deref(), status.code());
-        if outcome != Outcome::Pass {
-            failed += 1;
+        match outcome {
+            Outcome::Pass => {}
+            Outcome::Skipped(_) => skipped += 1,
+            Outcome::Fail(_) | Outcome::Broken(_) => failed += 1,
         }
         print(&format!("{:<12} {outcome}", check.name));
     }
 
+    let ran = checks.len() - skipped;
     if failed > 0 {
         bail!(
-            "{failed} of {} checks didn't pass: see result.txt, nice.log and reaper.stdout in {}",
-            checks.len(),
+            "{failed} of {ran} checks didn't pass: see result.txt, nice.log and reaper.stdout in {}",
             run_dir.display()
         );
     }
-    print(&format!("all {} checks passed", checks.len()));
+    if skipped > 0 {
+        print(&format!("all {ran} checks passed; {skipped} skipped"));
+    } else {
+        print(&format!("all {ran} checks passed"));
+    }
     Ok(())
 }
 
@@ -330,6 +361,7 @@ fn checks(plugin: &Plugin<'_>, reaper_dir: &Path) -> Result<Vec<Check>> {
             name: file.trim_end_matches(".lua").to_owned(),
             script: reaper_dir.join("checks").join(file),
             env: env_of(text),
+            needs_editor: needs_editor(text),
         })
         .collect();
     let own = plugin.workspace_root.join(PLUGIN_CHECKS);
@@ -364,6 +396,7 @@ fn checks(plugin: &Plugin<'_>, reaper_dir: &Path) -> Result<Vec<Check>> {
             name,
             script,
             env: env_of(&text),
+            needs_editor: needs_editor(&text),
         });
     }
     Ok(checks)
@@ -459,6 +492,10 @@ mod tests {
             outcome(Some("ERROR\nno audio device\n"), Some(0)),
             Outcome::Broken("no audio device".to_owned())
         );
+        assert_eq!(
+            outcome(Some("SKIP\nno parameter\n"), Some(0)),
+            Outcome::Skipped("no parameter".to_owned())
+        );
     }
 
     #[test]
@@ -485,6 +522,26 @@ mod tests {
             .find(|(path, _)| *path == "checks/wheel.lua")
             .unwrap();
         assert_eq!(env_of(wheel), ["FAMILY_E2E_WHEEL=8"]);
+    }
+
+    #[test]
+    fn a_header_says_whether_a_check_needs_an_editor() {
+        assert!(needs_editor(
+            "-- e2e-env: A=1\n-- e2e-needs: editor\nlocal x = 1\n"
+        ));
+        assert!(!needs_editor(
+            "-- about the editor\nlocal x = 1\n-- e2e-needs: editor\n"
+        ));
+    }
+
+    #[test]
+    fn only_the_wheel_check_needs_an_editor() {
+        let needing: Vec<&str> = FILES
+            .iter()
+            .filter(|(path, text)| path.starts_with("checks/") && needs_editor(text))
+            .map(|(path, _)| *path)
+            .collect();
+        assert_eq!(needing, ["checks/wheel.lua"]);
     }
 
     #[test]
