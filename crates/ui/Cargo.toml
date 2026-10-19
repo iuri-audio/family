@@ -13,7 +13,6 @@ e2e-hooks = []
 [dependencies]
 egui = { version = "0.36.1", default-features = false }
 nice-plug = { version = "0.4.2", default-features = false, features = ["editor"] }
-nice-plug-egui = "0.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 
 [dev-dependencies]
