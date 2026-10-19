@@ -1,6 +1,6 @@
 [package]
 name        = "family-dsp"
-description = "DSP shared by the family's plugins: the crossover, the audited conversions, the click statistic and averaging stereo to a DI."
+description = "DSP shared by the family's plugins: the crossover, the audited conversions, the click statistic, turning the host's input into a DI, and the reported latency."
 version     = "0.1.0"
 edition.workspace    = true
 publish.workspace    = true

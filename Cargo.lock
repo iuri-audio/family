@@ -559,7 +559,9 @@ dependencies = [
  "clap",
  "family-dsp",
  "hound",
+ "serde",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [package]
 name        = "family-wav"
-description = "WAV reading and writing for the family's offline tools, and the stats, split and join commands."
+description = "WAV reading and writing for the family's offline tools, the stats, split and join commands, and loading a plugin's tuning."
 version     = "0.1.0"
 edition.workspace    = true
 publish.workspace    = true
@@ -11,8 +11,11 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 family-dsp = { path = "../dsp" }
 hound = "3.5.1"
+serde = "1.0.229"
+toml = "1.1.8"
 
 [dev-dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
 
 [lints]

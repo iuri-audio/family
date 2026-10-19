@@ -1,9 +1,10 @@
-//! WAV reading and writing for the family's offline tools, and the commands every plugin's
-//! `render` shares: `stats`, `split` and `join`.
+//! WAV reading and writing for the family's offline tools, the commands every plugin's `render`
+//! shares (`stats`, `split` and `join`), and the rest of what they share in [`render`].
 //!
 //! A plugin's `render` adds the commands to its own subcommands with [`Command`], or the `wav`
 //! binary runs them on their own.
 
+pub mod render;
 pub mod split_join;
 pub mod stats;
 
