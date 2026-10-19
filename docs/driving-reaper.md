@@ -47,9 +47,9 @@ A launcher runs Reaper on a scratch copy of the developer's configuration (setti
 
 For scripts that need media files staged on the Windows drive, use `bash reaper/stage-and-run-wsl.sh <out-dir> <script.lua> <input-file>... [-- KEY=VALUE...]`. It copies each input by basename under `$OUT/input` and then uses `run-wsl.sh`; environment pairs after `--` are passed through to the ReaScript.
 
-`reaper/align-onsets.py` is a detector-independent aligner for ordered onset sequences. It accepts a detector executable and arguments, expects one output line per detection in the form `<seconds> s (sample <n>), late <milliseconds> ms`, and writes paired offset summaries and unmatched counts. Use `--reference-pair LABEL LEFT.wav RIGHT.wav` for additional pairs not staged under `$OUT/input`.
+`scripts/align-onsets.py` is a detector-independent aligner for ordered onset sequences. It accepts a detector executable and arguments, expects one output line per detection in the form `<seconds> s (sample <n>), late <milliseconds> ms`, and writes paired offset summaries and unmatched counts. Use `--reference-pair LABEL LEFT.wav RIGHT.wav` for additional pairs not staged under `$OUT/input`.
 
-`reaper/octave-balance.py` compares WAV files' levels octave by octave against the first one, in dB, to show whether a render is darker or brighter than its DI or a reference render: `python3 -I reaper/octave-balance.py <di.wav> <render.wav>...`. Each level is averaged over the whole file, so compare files of about the same length. It needs numpy and scipy.
+`scripts/octave-balance.py` compares WAV files' levels octave by octave against the first one, in dB, to show whether a render is darker or brighter than its DI or a reference render: `python3 -I scripts/octave-balance.py <di.wav> <render.wav>...`. Each level is averaged over the whole file, so compare files of about the same length. It needs numpy and scipy.
 
 ## Saved projects and new instances (Windows)
 
