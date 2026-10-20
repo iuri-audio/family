@@ -2,8 +2,8 @@
 //! forwards that feature, and only the e2e build turns it on, so a release build holds none of
 //! this. Each hook does nothing unless its environment variable is set when the plugin loads.
 //!
-//! Every hook's variable starts with `FAMILY_E2E_`: each plugin's CI checks that its release
-//! build has no such text in it.
+//! Every hook's variable starts with `FAMILY_E2E_`: the CI of each plugin with an editor checks
+//! that its release build has no such text in it.
 
 use std::sync::OnceLock;
 use std::time::Duration;
