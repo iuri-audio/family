@@ -31,7 +31,7 @@ Each plugin's colour comes in three strengths: the colour itself (arc, switch, b
 | Plugin | Colour | Lit lamp | Glow |
 | --- | --- | --- | --- |
 | Doubler | `#57cfbd` | `#8af0e0` | `#57cfbd8c` on the arc, `#57cfbdcc` on the lamp |
-| Pitch shifter (proposed) | `#f0a43a` | `#ffc56e` | same opacities |
+| Drop (a stand-in, not chosen yet) | `#f0a43a` | `#ffc56e` | same opacities |
 | Quiet | `#a396ff` | `#c4bbff` | same opacities |
 
 The glows are `night::DIAL_GLOW` on a lit dial's arc (a sigma of 4.5 points) and `night::LAMP_GLOW` on the lamp (a sigma of 2.5 points, the lamp grown by 3 points first). Their widths were chosen by eye to match the vizia build's `box-shadow`s (`0px 0px 18px` and `0px 0px 10px 3px`), which femtovg rendered at a sigma of about a quarter of the blur radius.
