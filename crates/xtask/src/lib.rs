@@ -9,6 +9,7 @@
 //! cargo xtask install --release --target x86_64-pc-windows-msvc  # bundle, then install
 //! cargo xtask install --flatpak --release                         # for Flathub's Reaper
 //! cargo xtask e2e --release --target x86_64-pc-windows-msvc      # end-to-end checks in Reaper
+//! cargo xtask e2e --release                                      # ...in a native Linux Reaper
 //! ```
 //!
 //! Any arguments after `bundle`, `install` or `e2e` go to `cargo build`, apart from `--flatpak`. A
@@ -25,7 +26,8 @@
 //!
 //! `e2e` bundles with the test hooks (the plugin's `e2e-hooks` feature, which forwards family-ui's)
 //! into `target/e2e/`, never where a release build goes, then runs the end-to-end checks in Reaper:
-//! on Windows from WSL with a Windows MSVC target, or in Flathub's Reaper with `--flatpak`. See
+//! on Windows from WSL with a Windows MSVC target, in Flathub's Reaper with `--flatpak`, or in a
+//! Reaper installed natively on Linux with a native build. See
 //! [`e2e`] and `docs/driving-reaper.md`.
 //!
 //! This wraps `nice_plug_xtask::bundle` instead of using `nice_plug_xtask::main`, because `main`
