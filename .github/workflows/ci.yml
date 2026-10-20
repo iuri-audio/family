@@ -25,13 +25,12 @@ jobs:
       - name: Install stable clippy
         run: rustup toolchain install stable --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install the editor's system libraries
-        # vizia's window and OpenGL bindings link X11, xcb and GL, the same set nih-plug's CI installs.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The e2e hooks (family-ui's `e2e-hooks`) and family-dsp's `serde` are off by default, so
+      # without this their code would first be compiled in a plugin, after it bumps the rev.
+      - name: Clippy with every feature
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -40,10 +39,5 @@ jobs:
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
-      - name: Install the editor's system libraries
-        # vizia's window and OpenGL bindings link X11, xcb and GL, the same set nih-plug's CI installs.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: Test
         run: cargo test --workspace
