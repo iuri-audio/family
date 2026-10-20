@@ -1,5 +1,5 @@
 //! Build helper for the family's plugins: builds a plugin and bundles it as VST3 and CLAP into
-//! `target/bundled/`, and installs the bundles.
+//! `target/bundled/`, installs the bundles, and runs the plugin's end-to-end checks in Reaper.
 //!
 //! Each plugin's `xtask` crate is a one-line `main` that calls [`main`] with its [`Plugin`]:
 //!
@@ -65,11 +65,11 @@ pub struct Plugin<'a> {
 const USAGE: &str = "usage: cargo xtask bundle|install|e2e [--flatpak] [cargo build arguments, e.g. \
                      --release --target <triple>]";
 
-/// Runs `bundle` or `install` for `plugin`, with the arguments the process was started with.
+/// Runs `bundle`, `install` or `e2e` for `plugin`, with the arguments the process was started with.
 ///
 /// # Errors
 ///
-/// If the command is neither, or if building, bundling or installing fails.
+/// If the command is none of these, or if building, bundling or installing fails.
 pub fn main(plugin: &Plugin<'_>) -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next();

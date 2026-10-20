@@ -1,6 +1,6 @@
 # The plugin family's look
 
-Doubler was the first of a set of guitar plugins; Quiet (noise reduction) is the second and a pitch shifter is planned. They share one look, called **Night**, chosen in Doubler's #21. This page is what each plugin starts from.
+Doubler was the first of a set of guitar plugins; Quiet (noise reduction) is the second and Drop (a pitch shifter for drop tuning) the third. They share one look, called **Night**, chosen in Doubler's #21. This page is what each plugin starts from.
 
 ## What the family shares
 
