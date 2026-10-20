@@ -27,6 +27,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The e2e hooks (family-ui's `e2e-hooks`) and family-dsp's `serde` are off by default, so
+      # without this their code would first be compiled in a plugin, after it bumps the rev.
+      - name: Clippy with every feature
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-latest
