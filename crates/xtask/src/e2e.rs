@@ -24,7 +24,7 @@ use crate::Plugin;
 
 /// The files from `docs/reaper/` a run needs, written into the run's folder: the launchers, the
 /// prelude and family's checks.
-const FILES: [(&str, &str); 7] = [
+const FILES: [(&str, &str); 8] = [
     (
         "prelude.lua",
         include_str!("../../../docs/reaper/prelude.lua"),
@@ -40,6 +40,10 @@ const FILES: [(&str, &str); 7] = [
     (
         "run-flatpak.sh",
         include_str!("../../../docs/reaper/run-flatpak.sh"),
+    ),
+    (
+        "run-linux.sh",
+        include_str!("../../../docs/reaper/run-linux.sh"),
     ),
     (
         "checks/load.lua",
@@ -83,21 +87,33 @@ pub enum Host {
     Wsl,
     /// Flathub's Reaper on Linux.
     Flatpak,
+    /// Reaper installed natively on Linux.
+    Linux,
 }
 
 impl Host {
     /// The host for a build with `flatpak` and the target triple `target`, or an error saying
     /// which builds the checks can run.
     pub fn for_build(flatpak: bool, target: Option<&str>) -> Result<Self> {
+        let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
+        Self::for_machine(flatpak, target, wsl, cfg!(target_os = "linux"))
+    }
+
+    /// [`Self::for_build`] on a machine that is or isn't `wsl`, and does or doesn't run `linux`.
+    fn for_machine(flatpak: bool, target: Option<&str>, wsl: bool, linux: bool) -> Result<Self> {
         if flatpak {
             return Ok(Self::Flatpak);
         }
-        if crate::is_msvc(target) && std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        if crate::is_msvc(target) && wsl {
             return Ok(Self::Wsl);
         }
+        // A native build: no target, or a Linux one. Not from WSL, whose Reaper is Windows'.
+        if linux && !wsl && target.is_none_or(|target| target.contains("-linux-")) {
+            return Ok(Self::Linux);
+        }
         bail!(
-            "e2e drives Reaper on Windows from WSL (--target x86_64-pc-windows-msvc) or \
-             Flathub's Reaper (--flatpak)"
+            "e2e drives Reaper on Windows from WSL (--target x86_64-pc-windows-msvc), Flathub's \
+             Reaper (--flatpak) or a Reaper installed natively on Linux (a native build)"
         )
     }
 
@@ -106,6 +122,7 @@ impl Host {
         match self {
             Self::Wsl => "run-wsl.sh",
             Self::Flatpak => "run-flatpak.sh",
+            Self::Linux => "run-linux.sh",
         }
     }
 
@@ -117,6 +134,10 @@ impl Host {
                 PathBuf::from,
             )),
             Self::Flatpak => Ok(home()?.join(".var/app/fm.reaper.Reaper/config/REAPER")),
+            Self::Linux => match std::env::var_os("REAPER_CONFIG") {
+                Some(config) => Ok(PathBuf::from(config)),
+                None => Ok(home()?.join(".config/REAPER")),
+            },
         }
     }
 
@@ -124,7 +145,7 @@ impl Host {
     const fn ini(self) -> &'static str {
         match self {
             Self::Wsl => "REAPER.ini",
-            Self::Flatpak => "reaper.ini",
+            Self::Flatpak | Self::Linux => "reaper.ini",
         }
     }
 
@@ -132,7 +153,9 @@ impl Host {
     const fn caches(self) -> [&'static str; 2] {
         match self {
             Self::Wsl => ["reaper-vstplugins64.ini", "reaper-clap-win64.ini"],
-            Self::Flatpak => ["reaper-vstplugins64.ini", "reaper-clap-linux-x86_64.ini"],
+            Self::Flatpak | Self::Linux => {
+                ["reaper-vstplugins64.ini", "reaper-clap-linux-x86_64.ini"]
+            }
         }
     }
 
@@ -142,7 +165,7 @@ impl Host {
         let folder = format!("{}-e2e", plugin.name.to_lowercase());
         match self {
             Self::Wsl => windows_home().join("AppData/Local/Temp").join(folder),
-            Self::Flatpak => plugin.workspace_root.join("target").join(folder),
+            Self::Flatpak | Self::Linux => plugin.workspace_root.join("target").join(folder),
         }
     }
 
@@ -162,7 +185,7 @@ impl Host {
                 );
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
             }
-            Self::Flatpak => Ok(path.to_string_lossy().into_owned()),
+            Self::Flatpak | Self::Linux => Ok(path.to_string_lossy().into_owned()),
         }
     }
 }
@@ -318,6 +341,7 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
             .arg(match host {
                 Host::Wsl => "E2E_HOST=wsl",
                 Host::Flatpak => "E2E_HOST=flatpak",
+                Host::Linux => "E2E_HOST=linux",
             })
             .args(&check.env)
             .env(
@@ -429,7 +453,7 @@ fn with_plugin_paths(ini: &[u8], folder: &str, host: Host) -> Vec<u8> {
         });
     let keys = match host {
         Host::Wsl => ["vstpath64", "clap_path_win64"],
-        Host::Flatpak => ["vstpath", "clap_path_linux-x86_64"],
+        Host::Flatpak | Host::Linux => ["vstpath", "clap_path_linux-x86_64"],
     };
     for key in keys {
         let prefix = format!("{key}=");
@@ -438,7 +462,7 @@ fn with_plugin_paths(ini: &[u8], folder: &str, host: Host) -> Vec<u8> {
             lines.insert(at, format!("{prefix}{folder}").into_bytes());
         }
     }
-    if host == Host::Flatpak {
+    if host != Host::Wsl {
         // Reaper 7.82 adds ~/.vst3 on its first VST3 scan unless this migration bit is set.
         // With that bit absent, setting the path alone is not enough. Keep every other flag
         // (837 is Reaper's default without the bit).
@@ -542,6 +566,49 @@ mod tests {
             .map(|(path, _)| *path)
             .collect();
         assert_eq!(needing, ["checks/wheel.lua"]);
+    }
+
+    #[test]
+    fn a_native_linux_build_runs_in_the_native_reaper() {
+        for target in [None, Some("x86_64-unknown-linux-gnu")] {
+            let host = Host::for_machine(false, target, false, true).unwrap();
+            assert_eq!(host, Host::Linux);
+        }
+    }
+
+    #[test]
+    fn flatpak_and_wsl_builds_keep_their_hosts() {
+        let msvc = Some("x86_64-pc-windows-msvc");
+
+        assert_eq!(
+            Host::for_machine(true, None, false, true).unwrap(),
+            Host::Flatpak
+        );
+        assert_eq!(
+            Host::for_machine(false, msvc, true, true).unwrap(),
+            Host::Wsl
+        );
+    }
+
+    #[test]
+    fn builds_with_no_reaper_to_run_them_are_refused() {
+        let msvc = Some("x86_64-pc-windows-msvc");
+
+        // A native build from WSL, whose Reaper is Windows'; a Windows build off WSL; any build
+        // off Linux without the Flatpak.
+        Host::for_machine(false, None, true, true).unwrap_err();
+        Host::for_machine(false, msvc, false, true).unwrap_err();
+        Host::for_machine(false, None, false, false).unwrap_err();
+    }
+
+    #[test]
+    fn a_native_linux_config_gets_the_vst3_migration_bit_too() {
+        let patched = with_plugin_paths(b"[REAPER]\nvstfullstate=837\n", "/p", Host::Linux);
+
+        let text = String::from_utf8(patched).unwrap();
+        assert!(text.contains("vstfullstate=9029"), "{text}");
+        assert!(text.contains("vstpath=/p"), "{text}");
+        assert!(text.contains("clap_path_linux-x86_64=/p"), "{text}");
     }
 
     #[test]

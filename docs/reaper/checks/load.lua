@@ -8,7 +8,7 @@
 --   PLUGIN_EDITOR  "1" if the plugin has an editor of its own, "0" if not
 --   BUILD_TAG    a folder name in the path of the build under test, so a VST3 loaded from
 --                anywhere else fails the check
---   E2E_HOST     "flatpak" or "wsl": the runner's host, for the Linux CLAP library check
+--   E2E_HOST     "flatpak", "linux" or "wsl": the runner's host, for the Linux CLAP library check
 --   PARAM        optional: the parameter to exercise, as the host names it
 
 local drive = dofile(os.getenv("PRELUDE"))
@@ -33,7 +33,7 @@ local check_format, check_high
 -- Linux's CLAP fx_ident is only the plugin ID, and the scan cache has only a basename.
 -- The process's mapped libraries give the actual file Reaper loaded instead.
 local function check_clap_path()
-  if os.getenv("E2E_HOST") ~= "flatpak" then return true end
+  if os.getenv("E2E_HOST") == "wsl" then return true end
   local maps, err = io.open("/proc/self/maps", "r")
   if not maps then
     drive.error("can't verify the loaded CLAP library: ", err)
