@@ -1,10 +1,11 @@
 //! WAV reading and writing for the family's offline tools, the commands every plugin's `render`
-//! shares (`stats`, `split` and `join`), and the rest of what they share in [`render`].
+//! shares (`stats`, `split`, `join` and `signal`), and the rest of what they share in [`render`].
 //!
 //! A plugin's `render` adds the commands to its own subcommands with [`Command`], or the `wav`
 //! binary runs them on their own.
 
 pub mod render;
+pub mod signal;
 pub mod split_join;
 pub mod stats;
 
@@ -22,6 +23,8 @@ pub enum Command {
     Split(split_join::SplitArgs),
     /// Joins two mono WAVs into a stereo file. The shorter one is padded with silence.
     Join(split_join::JoinArgs),
+    /// Writes a test signal from `family-signals` to a mono 32-bit float WAV.
+    Signal(signal::Args),
 }
 
 impl Command {
@@ -35,6 +38,7 @@ impl Command {
             Self::Stats(args) => stats::run(args),
             Self::Split(args) => split_join::split(args),
             Self::Join(args) => split_join::join(args),
+            Self::Signal(args) => signal::run(args),
         }
     }
 }

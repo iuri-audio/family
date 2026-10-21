@@ -1,7 +1,8 @@
 //! Test support for the family's plugins: synthetic guitar-like signals, deterministic noise, and
 //! the levels tests judge them by.
 //!
-//! For `[dev-dependencies]` only: it uses `std`, and nothing here belongs on the audio path.
+//! For `[dev-dependencies]`, and for `family-wav`'s offline `signal` command: it uses `std`, and
+//! nothing here belongs on the audio path.
 //!
 //! Each generator reproduces, sample for sample, one the plugins' own tests wrote first, so a test
 //! moving onto this crate plays exactly what it played before. Where two plugins wrote different

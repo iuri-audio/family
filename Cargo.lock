@@ -558,6 +558,7 @@ dependencies = [
  "anyhow",
  "clap",
  "family-dsp",
+ "family-signals",
  "hound",
  "serde",
  "tempfile",

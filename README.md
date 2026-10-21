@@ -5,9 +5,9 @@ Code shared by a family of guitar plugins: Doubler, Quiet and Drop so far. The f
 | Crate | What it holds |
 |---|---|
 | `family-dsp` | `no_std` DSP: the crossover (any number of bands, Linkwitz-Riley, summing flat), the biquad, the audited float↔integer conversions, the click statistic (stereo or mono), turning the host's channels into a DI and writing the output back (`process_di`), the reported latency, and lining an offline render up with its DI (`lined_up`) |
-| `family-signals` | Test support, for `[dev-dependencies]`: the synthetic plucks, clicks, notes, sines and seeded noise the plugins' tests play, and their RMS and peak levels |
+| `family-signals` | Test support, for `[dev-dependencies]` (and `family-wav`, whose offline tools write the signals to files): the synthetic plucks, clicks, notes, sines and seeded noise the plugins' tests play, and their RMS and peak levels |
 | `family-ui` | The editor look, Night (`docs/family-identity.md`), in egui on nice-plug: the dial, switch, lamp and glow, the bundled Archivo, the look's colours and sizes, and the evenly scaled canvas with its corner grip |
-| `family-wav` | WAV reading and writing for each plugin's offline `render`, the `stats`, `split` and `join` commands (also runnable on their own as the `wav` binary), loading a plugin's tuning (`render::find_tuning`), and the click statistic as the reports print it (`stats::describe_jump`) |
+| `family-wav` | WAV reading and writing for each plugin's offline `render`, the `stats`, `split`, `join` and `signal` commands (also runnable on their own as the `wav` binary; `signal` writes `family-signals`' test signals to a file), loading a plugin's tuning (`render::find_tuning`), and the click statistic as the reports print it (`stats::describe_jump`) |
 | `family-xtask` | `cargo xtask bundle`, `cargo xtask install` and `cargo xtask e2e` (the end-to-end checks in Reaper, `docs/driving-reaper.md`): each plugin's `xtask` is a `main` that calls `family_xtask::main` with its package, bundle name, install folder variable, workspace root and whether it has an editor |
 
 ## Using it from a plugin
