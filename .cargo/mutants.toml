@@ -1,0 +1,32 @@
+# Line numbers pin some of these where the same name also covers a mutant the tests catch. If the
+# code moves, those just come back as missed.
+# Each mutant is tested by the whole workspace.
+test_workspace = true
+# Test hooks behind `e2e-hooks`, which `cargo test` doesn't build: `cargo xtask e2e` is their test.
+exclude_globs = ["crates/ui/src/e2e.rs"]
+exclude_re = [
+    # Debug output of widgets, derived by hand only because their fields aren't Debug.
+    'crates/ui/src/.*Debug for',
+    # Allpasses past a band's own are identities, so running more of them changes nothing.
+    'crossover\.rs:117:41: replace - with \+ in Crossover<BANDS>::process',
+    'crossover\.rs:117:37: replace - with [+/] in Crossover<BANDS>::process',
+    # Each signal is exactly zero at its own start: every partial is a sine at phase 0.
+    'signals/src/lib\.rs:\d+:\d+: replace < with <= in (click|slow_click|note|bright_note|quick_pluck)$',
+    # A stroke's cross-section is symmetric, so reflecting it across the centre line draws the same.
+    'glow\.rs:164:46: replace \+ with - in stroke_arc',
+    # Dividing by a cap's direction (±1) is multiplying by it.
+    'glow\.rs:180:55: replace \* with / in stroke_arc',
+    # Exact ties against a tolerance, with no right answer.
+    'replace > with >= in Canvas::(show|measure|grip)',
+    'replace < with <= in missed_scale',
+    # Setting an unchanged zoom again is harmless: all it does is restart the grip's patience.
+    'canvas\.rs:301:30: replace - with [+/] in Canvas::grip',
+    # Reaper's own file names and folders: only a run in Reaper can tell if they're right.
+    'replace Host::(ini|caches|config_dir)',
+    'replace home -> ',
+    # Needs a build, or Reaper, or the process's arguments: `cargo xtask` itself is the test.
+    'xtask/src/lib\.rs:.* in (main|bundle)$',
+    'xtask/src/lib\.rs:\d+:\d+: (replace|delete) (main|bundle|print_installed) ',
+    'xtask/src/flatpak\.rs:\d+:\d+: replace bundle ',
+    'xtask/src/e2e\.rs:\d+:\d+: replace (run|print)( |$)',
+]

@@ -333,6 +333,231 @@ mod tests {
     }
 
     #[test]
+    fn a_glows_tail_follows_the_gaussian() {
+        let glow = Glow {
+            sigma: 4.0,
+            spread: 0.0,
+            opacity: 1.0,
+        };
+
+        // One sigma past a wide shape's edge, a Gaussian blur has left about 16 %.
+        let profile = glow.profile(12.0);
+        let one_sigma_out = profile
+            .iter()
+            .find(|stop| (stop.distance - 16.0).abs() < 1e-3)
+            .expect("a stop one sigma out");
+        assert_close(one_sigma_out.alpha, 0.158_7, 1e-3);
+    }
+
+    #[test]
+    fn a_stroke_as_narrow_as_the_blur_never_reaches_full_strength() {
+        let glow = Glow {
+            sigma: 4.0,
+            spread: 0.0,
+            opacity: 1.0,
+        };
+
+        // At its centre, what's left is the Gaussian's share within one sigma of it.
+        assert_close(glow.profile(4.0)[0].alpha, 0.682_7, 1e-3);
+    }
+
+    #[test]
+    fn a_spread_grows_the_shape_before_its_blurred() {
+        let sigma = 2.5;
+        let spread = Glow {
+            sigma,
+            spread: 3.0,
+            opacity: 1.0,
+        };
+        let grown = Glow {
+            sigma,
+            spread: 0.0,
+            opacity: 1.0,
+        };
+
+        assert_eq!(spread.profile(4.0), grown.profile(7.0));
+    }
+
+    /// The total area of the triangles `mesh` holds.
+    fn area(mesh: &Mesh) -> f32 {
+        mesh.indices
+            .chunks(3)
+            .map(|triangle| {
+                let corner = |i: usize| mesh.vertices[triangle[i] as usize].pos;
+                let (a, b, c) = (corner(0), corner(1), corner(2));
+                (b - a).x.mul_add((c - a).y, -(b - a).y * (c - a).x).abs() / 2.0
+            })
+            .sum()
+    }
+
+    fn profile_of_steps(radius: f32, steps: u16) -> Vec<Stop> {
+        (0..=steps)
+            .map(|step| Stop {
+                distance: radius * f32::from(step) / f32::from(steps),
+                alpha: 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_disk_covers_its_circle_exactly_once() {
+        for radius in [20.0, 100.0] {
+            for profile in [crisp(radius, 0.0), profile_of_steps(radius, 12)] {
+                let mut mesh = Mesh::default();
+                disk(&mut mesh, Pos2::new(7.0, 9.0), &profile, Color32::WHITE);
+
+                assert!(mesh.is_valid());
+                assert_close(area(&mesh) / (PI * radius * radius), 1.0, 0.04);
+                let reach = mesh
+                    .vertices
+                    .iter()
+                    .map(|vertex| (vertex.pos - Pos2::new(7.0, 9.0)).length())
+                    .fold(0.0, f32::max);
+                assert_close(reach, radius, 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn a_disks_triangles_only_join_neighbouring_rings() {
+        let (centre, radius, rings) = (Pos2::new(7.0, 9.0), 20.0, 12);
+        let mut mesh = Mesh::default();
+        disk(
+            &mut mesh,
+            centre,
+            &profile_of_steps(radius, rings),
+            Color32::WHITE,
+        );
+
+        let ring_width = radius / f32::from(rings);
+        for triangle in mesh.indices.chunks(3) {
+            let distances = triangle
+                .iter()
+                .map(|&index| (mesh.vertices[index as usize].pos - centre).length());
+            let (near, far) = distances.fold((f32::MAX, 0.0_f32), |(near, far), distance| {
+                (near.min(distance), far.max(distance))
+            });
+            assert!(far - near <= ring_width + 1e-3, "{near} to {far}");
+        }
+    }
+
+    /// How many of `mesh`'s vertices lie `distance` from `centre`.
+    fn on_circle(mesh: &Mesh, centre: Pos2, distance: f32) -> f32 {
+        mesh.vertices
+            .iter()
+            .filter(|vertex| ((vertex.pos - centre).length() - distance).abs() < 1e-3)
+            .fold(0.0, |count, _| count + 1.0)
+    }
+
+    #[test]
+    fn a_disks_edge_has_a_segment_about_every_two_points() {
+        let centre = Pos2::new(7.0, 9.0);
+        let radius = 10.0;
+        let mut mesh = Mesh::default();
+        disk(
+            &mut mesh,
+            centre,
+            &profile_of_steps(radius, 1),
+            Color32::WHITE,
+        );
+
+        let segments = on_circle(&mesh, centre, radius);
+        assert_close(segments, TAU * radius / 2.0, 2.0);
+    }
+
+    #[test]
+    fn an_arcs_edge_has_a_segment_about_every_two_points_wherever_it_starts() {
+        let centre = Pos2::new(50.0, 50.0);
+        let half_width = 6.0;
+        for radius in [40.0, 80.0] {
+            for from in [0.0, 0.75 * PI] {
+                let sweep = PI / 2.0;
+                let mut mesh = Mesh::default();
+                stroke_arc(
+                    &mut mesh,
+                    centre,
+                    radius,
+                    (from, from + sweep),
+                    &profile_of_steps(half_width, 1),
+                    Color32::WHITE,
+                );
+
+                let segments = on_circle(&mesh, centre, radius + half_width);
+                // Give or take rounding up, the ends, and the two caps meeting the edge there.
+                assert_close(segments, sweep * radius / 2.0, 4.0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_big_disk_stays_smooth_without_an_unbounded_mesh() {
+        let vertices = |radius: f32| {
+            let mut mesh = Mesh::default();
+            disk(&mut mesh, Pos2::ZERO, &crisp(radius, 0.0), Color32::WHITE);
+            mesh.vertices.len()
+        };
+
+        assert!(vertices(1.0) >= 8);
+        assert!(vertices(10.0) > vertices(1.0));
+        assert_eq!(vertices(1_000.0), vertices(10_000.0));
+    }
+
+    fn arc(from: f32, to: f32, profile: &[Stop]) -> Mesh {
+        let mut mesh = Mesh::default();
+        stroke_arc(
+            &mut mesh,
+            Pos2::new(50.0, 50.0),
+            40.0,
+            (from, to),
+            profile,
+            Color32::WHITE,
+        );
+        mesh
+    }
+
+    #[test]
+    fn an_arc_covers_its_band_and_its_two_round_caps_exactly_once() {
+        let half_width = 6.0;
+        let from = 0.75 * PI;
+        let sweep = 1.25 * PI;
+        // The band's length times its width, plus the two half disks that make one whole disk.
+        let band = sweep * 40.0 * 2.0 * half_width;
+        let expected = (PI * half_width).mul_add(half_width, band);
+
+        for profile in [crisp(half_width, 0.0), profile_of_steps(half_width, 12)] {
+            let mesh = arc(from, from + sweep, &profile);
+
+            assert!(mesh.is_valid());
+            assert_close(area(&mesh) / expected, 1.0, 0.02);
+        }
+    }
+
+    #[test]
+    fn an_arcs_caps_round_off_past_its_ends_and_it_stays_on_its_sweep() {
+        // A quarter turn from the right to the bottom of the circle, on a y-down screen.
+        let mesh = arc(0.0, PI / 2.0, &crisp(6.0, 0.0));
+        let (centre_x, centre_y) = (50.0, 50.0);
+        let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for vertex in &mesh.vertices {
+            left = left.min(vertex.pos.x);
+            right = right.max(vertex.pos.x);
+            top = top.min(vertex.pos.y);
+            bottom = bottom.max(vertex.pos.y);
+        }
+
+        assert_close(right, centre_x + 46.0, 0.1);
+        assert_close(bottom, centre_y + 46.0, 0.1);
+        // The caps reach back past each end by the half width, and no further.
+        assert_close(top, centre_y - 6.0, 0.1);
+        assert_close(left, centre_x - 6.0, 0.1);
+    }
+
+    #[test]
+    fn an_arc_with_no_cross_section_draws_nothing() {
+        assert_eq!(arc(0.0, PI, &[]).vertices.len(), 0);
+    }
+
+    #[test]
     fn an_arc_and_a_disk_make_whole_triangles() {
         let mut mesh = Mesh::default();
         stroke_arc(

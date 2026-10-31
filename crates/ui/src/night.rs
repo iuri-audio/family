@@ -71,3 +71,15 @@ pub const LAMP_GLOW: Glow = Glow {
     spread: 3.0,
     opacity: 204.0 / 255.0,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_glows_opacities_are_their_tokens() {
+        let byte = |opacity: f32| (opacity * 255.0).round();
+        assert!((byte(DIAL_GLOW.opacity) - f32::from(0x8c_u8)).abs() < f32::EPSILON);
+        assert!((byte(LAMP_GLOW.opacity) - f32::from(0xcc_u8)).abs() < f32::EPSILON);
+    }
+}

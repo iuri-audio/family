@@ -8,7 +8,7 @@
     reason = "test helpers; a failure should fail the test"
 )]
 
-use family_dsp::{Crossover, Steepness};
+use family_dsp::{Crossover, Steepness, UnsupportedSteepness};
 
 const RATES: [f64; 3] = [44_100.0, 48_000.0, 96_000.0];
 
@@ -200,4 +200,16 @@ fn missing_split_points_leave_the_top_bands_almost_empty_and_extra_ones_are_igno
         extra,
         impulse_responses::<4>(&FOUR, Steepness::Db24, 48_000.0)
     );
+}
+
+#[test]
+fn a_steepness_comes_from_its_decibels_per_octave() {
+    assert_eq!(Steepness::try_from(12), Ok(Steepness::Db12));
+    assert_eq!(Steepness::try_from(24), Ok(Steepness::Db24));
+    assert_eq!(Steepness::try_from(18), Err(UnsupportedSteepness(18)));
+}
+
+#[test]
+fn an_unsupported_steepness_says_what_it_was() {
+    assert!(UnsupportedSteepness(18).to_string().contains("18"));
 }

@@ -257,6 +257,13 @@ struct Check {
     needs_editor: bool,
 }
 
+impl Check {
+    /// Whether a plugin with or without an `editor` skips this check.
+    const fn skipped_for(&self, editor: bool) -> bool {
+        self.needs_editor && !editor
+    }
+}
+
 /// The leading comment lines of a check's script.
 fn header(script: &str) -> impl Iterator<Item = &str> {
     script.lines().take_while(|line| line.starts_with("--"))
@@ -301,12 +308,12 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
         checks.len(),
         run_dir.display()
     ));
-    let (mut failed, mut skipped) = (0, 0);
+    let mut outcomes = Vec::with_capacity(checks.len());
     for check in &checks {
-        if check.needs_editor && !plugin.editor {
-            skipped += 1;
+        if check.skipped_for(plugin.editor) {
             let outcome = Outcome::Skipped("needs an editor".to_owned());
             print(&format!("{:<12} {outcome}", check.name));
+            outcomes.push(outcome);
             continue;
         }
         let out = run_dir.join(&check.name);
@@ -352,27 +359,31 @@ pub fn run(plugin: &Plugin<'_>, bundled: &Path, host: Host) -> Result<()> {
             .context("could not run bash")?;
         let verdict = fs::read_to_string(out.join("verdict.txt")).ok();
         let outcome = outcome(verdict.as_deref(), status.code());
-        match outcome {
-            Outcome::Pass => {}
-            Outcome::Skipped(_) => skipped += 1,
-            Outcome::Fail(_) | Outcome::Broken(_) => failed += 1,
-        }
         print(&format!("{:<12} {outcome}", check.name));
+        outcomes.push(outcome);
     }
 
-    let ran = checks.len() - skipped;
+    print(&summary(&outcomes, &run_dir)?);
+    Ok(())
+}
+
+/// The line that sums up a run's `outcomes`. Fails unless every check that ran passed.
+fn summary(outcomes: &[Outcome], run_dir: &Path) -> Result<String> {
+    let count = |wanted: fn(&Outcome) -> bool| outcomes.iter().filter(|&o| wanted(o)).count();
+    let failed = count(|outcome| matches!(outcome, Outcome::Fail(_) | Outcome::Broken(_)));
+    let skipped = count(|outcome| matches!(outcome, Outcome::Skipped(_)));
+    let ran = outcomes.len() - skipped;
     if failed > 0 {
         bail!(
             "{failed} of {ran} checks didn't pass: see result.txt, nice.log and reaper.stdout in {}",
             run_dir.display()
         );
     }
-    if skipped > 0 {
-        print(&format!("all {ran} checks passed; {skipped} skipped"));
+    Ok(if skipped > 0 {
+        format!("all {ran} checks passed; {skipped} skipped")
     } else {
-        print(&format!("all {ran} checks passed"));
-    }
-    Ok(())
+        format!("all {ran} checks passed")
+    })
 }
 
 /// Family's checks, then the plugin's, sorted by name. The plugin's are copied beside family's,
@@ -520,6 +531,178 @@ mod tests {
             outcome(Some("SKIP\nno parameter\n"), Some(0)),
             Outcome::Skipped("no parameter".to_owned())
         );
+    }
+
+    #[test]
+    fn an_outcome_prints_its_word_and_reason() {
+        assert!(Outcome::Pass.to_string().starts_with("PASS"));
+        for (outcome, word) in [
+            (Outcome::Fail("why".to_owned()), "FAIL"),
+            (Outcome::Broken("why".to_owned()), "BROKEN"),
+            (Outcome::Skipped("why".to_owned()), "SKIP"),
+        ] {
+            let printed = outcome.to_string();
+            assert!(
+                printed.starts_with(word) && printed.contains("why"),
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_passes_only_if_every_check_that_ran_passed() {
+        let run = Path::new("/run");
+        let skip = || Outcome::Skipped(String::new());
+
+        assert_eq!(
+            summary(&[Outcome::Pass, Outcome::Pass], run).unwrap(),
+            "all 2 checks passed"
+        );
+        assert_eq!(
+            summary(&[Outcome::Pass, Outcome::Pass, skip()], run).unwrap(),
+            "all 2 checks passed; 1 skipped"
+        );
+        assert_eq!(
+            summary(&[skip()], run).unwrap(),
+            "all 0 checks passed; 1 skipped"
+        );
+        let error = summary(
+            &[
+                Outcome::Pass,
+                Outcome::Fail(String::new()),
+                Outcome::Broken(String::new()),
+                skip(),
+            ],
+            run,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("2 of 3 checks didn't pass"),
+            "{error}"
+        );
+        summary(&[Outcome::Broken(String::new())], run).unwrap_err();
+    }
+
+    #[test]
+    fn only_a_plugin_without_an_editor_skips_a_check_that_needs_one() {
+        let check = |needs_editor| Check {
+            name: String::new(),
+            script: PathBuf::new(),
+            env: Vec::new(),
+            needs_editor,
+        };
+
+        assert!(check(true).skipped_for(false));
+        assert!(!check(true).skipped_for(true));
+        assert!(!check(false).skipped_for(false));
+        assert!(!check(false).skipped_for(true));
+    }
+
+    const fn plugin(workspace_root: &Path) -> Plugin<'_> {
+        Plugin {
+            package: "fake",
+            name: "Fake",
+            install_dir_variable: "FAKE_INSTALL_DIR",
+            workspace_root,
+            editor: true,
+        }
+    }
+
+    fn check_names(checks: &[Check]) -> Vec<&str> {
+        checks.iter().map(|check| check.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_plugin_without_checks_of_its_own_runs_familys() {
+        let root = tempfile::tempdir().unwrap();
+        let reaper = root.path().join("reaper");
+
+        let checks = checks(&plugin(root.path()), &reaper).unwrap();
+
+        assert_eq!(check_names(&checks), ["load", "automation", "wheel"]);
+        assert_eq!(checks[0].script, reaper.join("checks/load.lua"));
+    }
+
+    #[test]
+    fn a_plugins_lua_scripts_are_copied_beside_familys_and_run_after_them() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join(PLUGIN_CHECKS);
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("second.lua"), "-- e2e-env: A=1\n").unwrap();
+        fs::write(own.join("first.lua"), format!("{NEEDS_EDITOR}\n")).unwrap();
+        fs::write(own.join("notes.txt"), "not a check").unwrap();
+        let reaper = root.path().join("reaper");
+
+        let checks = checks(&plugin(root.path()), &reaper).unwrap();
+
+        assert_eq!(
+            check_names(&checks),
+            ["load", "automation", "wheel", "first", "second"]
+        );
+        assert!(checks[3].needs_editor);
+        assert_eq!(checks[4].env, ["A=1"]);
+        assert_eq!(
+            fs::read_to_string(reaper.join("plugin/second.lua")).unwrap(),
+            "-- e2e-env: A=1\n"
+        );
+    }
+
+    #[test]
+    fn a_plugins_check_cant_take_the_name_of_one_of_familys() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join(PLUGIN_CHECKS);
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("load.lua"), "").unwrap();
+
+        let error = checks(&plugin(root.path()), &root.path().join("reaper"))
+            .err()
+            .expect("the clash is refused");
+
+        assert!(error.to_string().contains("family's checks"), "{error}");
+    }
+
+    #[test]
+    fn a_plugins_checks_folder_that_cant_be_listed_is_an_error_not_an_empty_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join(PLUGIN_CHECKS);
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, "a file, not a folder").unwrap();
+
+        let error = checks(&plugin(root.path()), &root.path().join("reaper"))
+            .err()
+            .expect("the folder can't be listed");
+
+        assert!(error.to_string().contains("can't list"), "{error}");
+    }
+
+    #[test]
+    fn every_hosts_launcher_is_among_the_files_a_run_writes() {
+        for host in [Host::Wsl, Host::Flatpak, Host::Linux] {
+            assert!(FILES.iter().any(|(path, _)| *path == host.launcher()));
+        }
+    }
+
+    #[test]
+    fn runs_go_under_the_workspace_or_on_the_windows_drive() {
+        let root = Path::new("/plugin");
+        let plugin = plugin(root);
+
+        assert_eq!(
+            Host::Linux.runs_dir(&plugin),
+            Path::new("/plugin/target/fake-e2e")
+        );
+        let wsl = Host::Wsl.runs_dir(&plugin);
+        assert!(wsl.starts_with("/mnt/c/Users"), "{}", wsl.display());
+        assert!(
+            wsl.ends_with("AppData/Local/Temp/fake-e2e"),
+            "{}",
+            wsl.display()
+        );
+    }
+
+    #[test]
+    fn a_native_reaper_names_a_path_as_it_is() {
+        assert_eq!(Host::Linux.host_path(Path::new("/a/b")).unwrap(), "/a/b");
     }
 
     #[test]

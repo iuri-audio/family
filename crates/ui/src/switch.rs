@@ -91,3 +91,192 @@ impl<'a, P: Param> Switch<'a, P> {
         response
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::{Color32, Event, FullOutput, PointerButton, RawInput, Shape, Vec2};
+    use nice_plug::prelude::BoolParam;
+
+    use super::*;
+    use crate::fake_host::Host;
+    use crate::text::install;
+
+    const AT: Pos2 = pos2(10.0, 10.0);
+    const COLOUR: Colour = Colour {
+        signal: Color32::GREEN,
+        lit: Color32::GREEN,
+    };
+
+    fn context() -> egui::Context {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        ctx
+    }
+
+    /// One frame of a switch at [`AT`], with its parameter `on`.
+    fn frame(
+        ctx: &egui::Context,
+        host: &Host,
+        time: f64,
+        on: bool,
+        events: Vec<Event>,
+    ) -> FullOutput {
+        let param = BoolParam::new("Bypass", on);
+        let setter = ParamSetter { raw_context: host };
+        let mut output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 100.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                Switch::new(&param, &setter, COLOUR).show(ui, AT);
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn click(ctx: &egui::Context, host: &Host, time: f64, on: bool, at: Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            ctx,
+            host,
+            time,
+            on,
+            vec![Event::PointerMoved(at), button(true)],
+        );
+        frame(ctx, host, time + 0.01, on, vec![button(false)]);
+    }
+
+    /// A point on the track.
+    fn track_centre() -> Pos2 {
+        AT + vec2(SWITCH_HEIGHT * SWITCH_TRACK_ASPECT, SWITCH_HEIGHT) / 2.0
+    }
+
+    #[test]
+    fn clicking_flips_it_inside_one_gesture() {
+        for (on, flipped) in [(false, 1.0), (true, 0.0)] {
+            let ctx = context();
+            let host = Host::default();
+            frame(&ctx, &host, 0.0, on, vec![]);
+
+            click(&ctx, &host, 0.01, on, track_centre());
+
+            assert_eq!(*host.requests.lock().expect("requests"), [flipped]);
+            assert_eq!(*host.gestures.lock().expect("gestures"), ["begin", "end"]);
+        }
+    }
+
+    #[test]
+    fn a_quick_second_click_flips_it_back() {
+        let ctx = context();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, false, vec![]);
+
+        click(&ctx, &host, 0.01, false, track_centre());
+        click(&ctx, &host, 0.05, true, track_centre());
+
+        assert_eq!(*host.requests.lock().expect("requests"), [1.0, 0.0]);
+    }
+
+    #[test]
+    fn clicking_its_name_flips_it_and_clicking_past_it_does_not() {
+        let ctx = context();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, false, vec![]);
+
+        click(
+            &ctx,
+            &host,
+            0.01,
+            false,
+            AT + vec2(SWITCH_NAME_OFFSET + 5.0, 8.0),
+        );
+        assert_eq!(host.requests.lock().expect("requests").len(), 1);
+
+        click(&ctx, &host, 1.0, false, AT + vec2(300.0, 8.0));
+        assert_eq!(host.requests.lock().expect("requests").len(), 1);
+    }
+
+    struct Drawn {
+        track: Rect,
+        track_fill: Color32,
+        corner: f32,
+        knob: Pos2,
+        knob_radius: f32,
+        knob_fill: Color32,
+        name_x: f32,
+    }
+
+    fn drawn(on: bool) -> Drawn {
+        let ctx = context();
+        let output = frame(&ctx, &Host::default(), 0.0, on, vec![]);
+        let shapes = || output.shapes.iter().map(|shape| &shape.shape);
+        let rect = shapes()
+            .find_map(|shape| match shape {
+                Shape::Rect(rect) => Some(rect),
+                _ => None,
+            })
+            .expect("a track");
+        let circle = shapes()
+            .find_map(|shape| match shape {
+                Shape::Circle(circle) => Some(circle),
+                _ => None,
+            })
+            .expect("a knob");
+        let name_x = shapes()
+            .find_map(|shape| match shape {
+                Shape::Text(text) => Some(text.pos.x),
+                _ => None,
+            })
+            .expect("a name");
+        Drawn {
+            track: rect.rect,
+            track_fill: rect.fill,
+            corner: f32::from(rect.corner_radius.nw),
+            knob: circle.center,
+            knob_radius: circle.radius,
+            knob_fill: circle.fill,
+            name_x,
+        }
+    }
+
+    #[test]
+    fn the_knob_sits_inside_a_pill_at_the_end_for_its_state_in_that_states_colours() {
+        let (off, on) = (drawn(false), drawn(true));
+
+        for switch in [&off, &on] {
+            assert_eq!(switch.track.min, AT);
+            assert!((switch.track.height() - SWITCH_HEIGHT).abs() < 1e-3);
+            assert!((switch.track.width() / SWITCH_HEIGHT - SWITCH_TRACK_ASPECT).abs() < 1e-3);
+            assert!((switch.corner - SWITCH_HEIGHT / 2.0).abs() < 1e-3);
+            assert!((switch.knob.y - switch.track.center().y).abs() < 1e-3);
+            let knob = Rect::from_center_size(switch.knob, Vec2::splat(switch.knob_radius * 2.0));
+            assert!(switch.track.shrink(1.0).contains_rect(knob));
+            assert!(switch.knob_radius > SWITCH_HEIGHT / 4.0);
+        }
+        // The same gap to the edge at either end.
+        let left_gap = off.knob.x - off.track.left();
+        let right_gap = on.track.right() - on.knob.x;
+        assert!((left_gap - right_gap).abs() < 1e-3);
+        assert!(off.knob.x < off.track.center().x && on.knob.x > on.track.center().x);
+
+        assert_eq!((off.track_fill, off.knob_fill), (TRACK, MUTED));
+        assert_eq!((on.track_fill, on.knob_fill), (COLOUR.signal, PANEL));
+    }
+
+    #[test]
+    fn the_name_starts_after_the_track_at_its_offset() {
+        let switch = drawn(false);
+
+        assert!((switch.name_x - (AT.x + SWITCH_NAME_OFFSET)).abs() < 1e-3);
+        assert!(switch.name_x > switch.track.right());
+    }
+}

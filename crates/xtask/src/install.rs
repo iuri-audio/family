@@ -333,6 +333,33 @@ mod tests {
     }
 
     #[test]
+    fn rolling_back_a_new_file_that_never_arrived_counts_as_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(roll_back(&[Swapped {
+            target: dir.path().join("never-arrived"),
+            previous: None,
+        }]));
+    }
+
+    #[test]
+    fn one_swap_that_cant_be_undone_fails_the_roll_back_wherever_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder can't be removed as a file, so this swap can't be undone.
+        let stuck = || Swapped {
+            target: dir.path().to_owned(),
+            previous: None,
+        };
+        let undoable = || Swapped {
+            target: dir.path().join("never-arrived"),
+            previous: None,
+        };
+
+        assert!(!roll_back(&[stuck(), undoable()]));
+        assert!(!roll_back(&[undoable(), stuck()]));
+    }
+
+    #[test]
     fn a_missing_bundle_is_an_error_and_installs_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let bundled = bundle(dir.path(), "new");

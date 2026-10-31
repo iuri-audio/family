@@ -432,8 +432,20 @@ mod tests {
         time: f64,
         window: Vec2,
         events: Vec<Event>,
-    ) {
-        frame_with_native(canvas, ctx, time, window, events, 1.0);
+    ) -> Frame {
+        frame_with_native(canvas, ctx, time, window, events, 1.0)
+    }
+
+    /// What one frame did.
+    struct Frame {
+        /// Whether the editor's contents were drawn.
+        drew: bool,
+        /// The window sizes it asked for.
+        requested: Vec<Vec2>,
+        /// When it asked to be drawn again.
+        repaint: std::time::Duration,
+        /// The lines it painted: the grip's.
+        lines: Vec<[Pos2; 2]>,
     }
 
     fn frame_with_native(
@@ -443,7 +455,7 @@ mod tests {
         window: Vec2,
         events: Vec<Event>,
         native: f32,
-    ) {
+    ) -> Frame {
         let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
@@ -451,6 +463,8 @@ mod tests {
             )),
             time: Some(time),
             events,
+            // egui takes this off a requested delay, and tests read the delay.
+            predicted_dt: 0.0,
             ..Default::default()
         };
         input
@@ -458,8 +472,327 @@ mod tests {
             .entry(egui::ViewportId::ROOT)
             .or_default()
             .native_pixels_per_point = Some(native);
-        let mut output = ctx.run_ui(input, |ui| canvas.show(ui, |_| {}));
+        let mut drew = false;
+        let mut output = ctx.run_ui(input, |ui| canvas.show(ui, |_| drew = true));
         output.textures_delta.clear();
+        let viewport = &output.viewport_output[&egui::ViewportId::ROOT];
+        Frame {
+            drew,
+            requested: viewport
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    ViewportCommand::InnerSize(size) => Some(*size),
+                    _ => None,
+                })
+                .collect(),
+            repaint: viewport.repaint_delay,
+            lines: output
+                .shapes
+                .iter()
+                .filter_map(|shape| match shape.shape {
+                    egui::Shape::LineSegment { points, .. } => Some(points),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    struct Rig {
+        ctx: egui::Context,
+        canvas: Canvas,
+        scale: Arc<EditorScale>,
+    }
+
+    /// An open canvas in a window `host_scale` times its size, settled, with no host resize
+    /// pending whatever the platform, at a time of 10 seconds.
+    fn settled(host_scale: f32) -> Rig {
+        let ctx = egui::Context::default();
+        let scale = Arc::new(EditorScale::default());
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::clone(&scale),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        canvas.host_resize = None;
+        for time in [9.0, 9.1, 9.2, 10.0] {
+            frame(&mut canvas, &ctx, time, SIZE * host_scale, vec![]);
+        }
+        assert!((ctx.zoom_factor() - host_scale).abs() < 1e-5);
+        Rig { ctx, canvas, scale }
+    }
+
+    const GRIP: Pos2 = pos2(712.0, 412.0);
+
+    fn press(at: Pos2) -> Vec<Event> {
+        vec![
+            Event::PointerMoved(at),
+            Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]
+    }
+
+    impl Rig {
+        /// The zoom after another frame, which is when egui applies a new one.
+        fn zoom_next_frame(&mut self) -> f32 {
+            frame(&mut self.canvas, &self.ctx, 10.03, SIZE, vec![]);
+            self.ctx.zoom_factor()
+        }
+
+        /// Presses the grip at 10.01 s, and drags it to `to` in points at 10.02 s.
+        fn drag_grip(&mut self, host_scale: f32, to: Pos2) {
+            let window = SIZE * host_scale;
+            frame(&mut self.canvas, &self.ctx, 10.01, window, press(GRIP));
+            frame(
+                &mut self.canvas,
+                &self.ctx,
+                10.02,
+                window,
+                vec![Event::PointerMoved(to)],
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_zoom_pins_the_window_to_the_canvas_only_as_it_takes_effect() {
+        let mut rig = settled(1.0);
+        rig.drag_grip(1.0, GRIP + vec2(72.0, 0.0));
+
+        // egui applies a new zoom in the next frame, and works out the window's size itself.
+        let takes_effect = frame(&mut rig.canvas, &rig.ctx, 10.03, SIZE, vec![]);
+        assert_eq!(takes_effect.requested, [SIZE]);
+
+        let after = frame(&mut rig.canvas, &rig.ctx, 10.04, SIZE * 1.1, vec![]);
+        assert_eq!(after.requested, []);
+    }
+
+    #[test]
+    fn a_window_that_isnt_the_canvass_size_is_corrected_once_per_size() {
+        let mut rig = settled(1.0);
+        let wide = SIZE + vec2(50.0, 0.0);
+        let tall = SIZE + vec2(0.0, 50.0);
+
+        for (time, window, expected) in [
+            (10.1, SIZE, vec![]),
+            (10.2, wide, vec![SIZE]),
+            (10.3, wide, vec![]),
+            (10.4, tall, vec![SIZE]),
+            (10.5, tall, vec![]),
+            (10.6, SIZE, vec![]),
+        ] {
+            let requested = frame(&mut rig.canvas, &rig.ctx, time, window, vec![]).requested;
+            assert_eq!(requested, expected, "at {time}");
+        }
+    }
+
+    #[test]
+    fn a_window_following_the_grip_isnt_corrected_during_the_drag() {
+        let mut rig = settled(1.0);
+        frame(&mut rig.canvas, &rig.ctx, 10.01, SIZE, press(GRIP));
+        frame(
+            &mut rig.canvas,
+            &rig.ctx,
+            10.02,
+            SIZE + vec2(50.0, 0.0),
+            vec![],
+        );
+
+        let during = frame(
+            &mut rig.canvas,
+            &rig.ctx,
+            10.03,
+            SIZE + vec2(50.0, 0.0),
+            vec![],
+        );
+
+        assert_eq!(during.requested, []);
+    }
+
+    #[test]
+    fn a_host_that_only_hears_size_changes_gets_one_nudge_with_the_editor_blank_meanwhile() {
+        let mut rig = settled(1.0);
+        rig.canvas.host_resize = Some(HostResize::Notify);
+
+        let nudged = frame(&mut rig.canvas, &rig.ctx, 10.1, SIZE, vec![]);
+        assert_eq!(nudged.requested, [SIZE + Vec2::splat(2.0)]);
+        assert!(!nudged.drew);
+
+        let restored = frame(&mut rig.canvas, &rig.ctx, 10.2, SIZE, vec![]);
+        assert_eq!(restored.requested, [SIZE]);
+        assert!(restored.drew);
+
+        let after = frame(&mut rig.canvas, &rig.ctx, 10.3, SIZE, vec![]);
+        assert_eq!(after.requested, []);
+        assert!(after.drew);
+    }
+
+    #[test]
+    fn a_host_is_only_nudged_once_the_scale_has_settled() {
+        let ctx = egui::Context::default();
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::new(EditorScale::default()),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        canvas.host_resize = Some(HostResize::Notify);
+        let placeholder = Vec2::splat(10_000.0);
+
+        // Still opening: a placeholder window can't be measured.
+        let opening = frame(&mut canvas, &ctx, 0.0, placeholder, vec![]);
+        assert_eq!(opening.requested, []);
+        assert!(!opening.drew);
+
+        // Measured, with a new zoom on its way.
+        let window = SIZE * 1.5;
+        let measured = frame(&mut canvas, &ctx, 0.1, window, vec![]);
+        assert_eq!(measured.requested, []);
+        assert!(!measured.drew);
+    }
+
+    #[test]
+    fn a_window_that_never_gets_the_canvass_shape_stops_blocking_the_editor() {
+        let ctx = egui::Context::default();
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::new(EditorScale::default()),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        canvas.host_resize = None;
+        let window = Vec2::splat(500.0);
+
+        for index in 0..OPENING_FRAMES {
+            let opening = frame(&mut canvas, &ctx, f64::from(index) / 60.0, window, vec![]);
+            assert!(!opening.drew, "frame {index}");
+            assert_eq!(opening.requested, [], "frame {index}");
+        }
+
+        // It gives up, shows the editor at the user's scale, and asks for the right window.
+        let gave_up = frame(&mut canvas, &ctx, 1.0, window, vec![]);
+        assert!(gave_up.drew);
+        assert_eq!(gave_up.requested, [SIZE]);
+    }
+
+    #[test]
+    fn a_window_opening_at_the_canvass_size_needs_no_correction() {
+        let ctx = egui::Context::default();
+        let mut canvas = Canvas::new(
+            SIZE,
+            Arc::new(EditorScale::default()),
+            Colour {
+                signal: egui::Color32::WHITE,
+                lit: egui::Color32::WHITE,
+            },
+        );
+        canvas.host_resize = None;
+
+        let opened = frame(&mut canvas, &ctx, 0.0, SIZE, vec![]);
+
+        assert!(opened.drew);
+        assert_eq!(opened.requested, []);
+    }
+
+    #[test]
+    fn the_grip_follows_the_pointer_in_pixels_on_a_scaled_display() {
+        let mut rig = settled(1.5);
+
+        // 72 points at a zoom of 1.5 is 108 pixels: a tenth of the 1080-pixel-wide canvas.
+        rig.drag_grip(1.5, GRIP + vec2(72.0, 0.0));
+
+        assert!((rig.scale.get() - 1.1).abs() < 1e-4, "{}", rig.scale.get());
+        assert!((rig.zoom_next_frame() - 1.65).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_grip_stops_at_the_users_scale_limits_on_a_scaled_display() {
+        for host_scale in [1.5, 2.0] {
+            for (to, limit) in [
+                (pos2(100_000.0, 100_000.0), scale::MAX),
+                (pos2(0.0, 0.0), scale::MIN),
+            ] {
+                let mut rig = settled(host_scale);
+
+                rig.drag_grip(host_scale, to);
+
+                let scale = rig.scale.get();
+                assert!((scale - limit).abs() < 1e-4, "{scale}");
+                assert!((rig.zoom_next_frame() / host_scale - limit).abs() < 1e-4);
+            }
+        }
+    }
+
+    /// Whether a second grip move goes through with the window `off` points from the canvas, after
+    /// the first move's zoom has taken effect.
+    fn second_move_goes_through(off: Vec2) -> bool {
+        let mut rig = settled(1.0);
+        rig.drag_grip(1.0, GRIP + vec2(72.0, 0.0));
+        let first = rig.scale.get();
+        let zoom = rig.zoom_next_frame();
+        frame(
+            &mut rig.canvas,
+            &rig.ctx,
+            10.04,
+            (SIZE + off) * zoom,
+            vec![Event::PointerMoved(GRIP + vec2(144.0, 0.0))],
+        );
+        (rig.scale.get() - first).abs() > 1e-4
+    }
+
+    #[test]
+    fn the_grip_waits_until_the_host_has_resized_to_within_one_percent() {
+        assert!(second_move_goes_through(Vec2::ZERO));
+        assert!(second_move_goes_through(vec2(3.0, 0.0)));
+        assert!(second_move_goes_through(vec2(0.0, 2.0)));
+        assert!(second_move_goes_through(vec2(-3.0, 2.0)));
+        assert!(!second_move_goes_through(vec2(20.0, 0.0)));
+        assert!(!second_move_goes_through(vec2(0.0, 20.0)));
+        assert!(!second_move_goes_through(vec2(-20.0, 0.0)));
+    }
+
+    #[test]
+    fn while_waiting_for_the_host_the_grip_asks_for_a_frame_when_its_patience_ends() {
+        let mut rig = settled(1.0);
+        rig.drag_grip(1.0, GRIP + vec2(72.0, 0.0));
+        // The zoom takes effect at 10.03 s, and the host doesn't grow the window.
+        let events = vec![Event::PointerMoved(GRIP + vec2(144.0, 0.0))];
+        frame(&mut rig.canvas, &rig.ctx, 10.03, SIZE, events);
+        frame(&mut rig.canvas, &rig.ctx, 10.04, SIZE, vec![]);
+
+        let waiting = frame(&mut rig.canvas, &rig.ctx, 10.05, SIZE, vec![]);
+
+        assert!((rig.scale.get() - 1.1).abs() < 1e-4, "{}", rig.scale.get());
+        let left = waiting.repaint.as_secs_f64();
+        assert!((left - (GRIP_PATIENCE - 0.03)).abs() < 0.01, "{left}");
+    }
+
+    #[test]
+    fn the_grip_is_drawn_inside_the_canvass_corner() {
+        let mut rig = settled(1.0);
+
+        let drawn = frame(&mut rig.canvas, &rig.ctx, 10.1, SIZE, vec![]);
+
+        let corner = Rect::from_min_max(SIZE.to_pos2() - Vec2::splat(GRIP_SIZE), SIZE.to_pos2());
+        assert_eq!(drawn.lines.len(), 3);
+        for [start, end] in drawn.lines {
+            assert!(
+                corner.contains(start) && corner.contains(end),
+                "{start:?} {end:?}"
+            );
+            // Each runs up and to the right.
+            assert!(start.x < end.x && start.y > end.y, "{start:?} {end:?}");
+        }
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The audited float↔integer conversion helpers.
 
 use family_dsp::convert::{
-    f32_to_pcm, f64_to_f32, pcm_to_f32, sample_to_seconds, seconds_to_samples,
+    f32_to_pcm, f64_to_f32, floor_to_count, ms_to_samples, pcm_to_f32, sample_to_seconds,
+    seconds_to_samples,
 };
 
 #[test]
@@ -68,4 +69,20 @@ fn a_duration_converts_to_the_nearest_whole_number_of_samples() {
 fn a_negative_or_undefined_duration_is_zero_samples() {
     assert_eq!(seconds_to_samples(-1.0, 48_000.0), 0);
     assert_eq!(seconds_to_samples(f64::NAN, 48_000.0), 0);
+}
+
+#[test]
+fn a_time_in_milliseconds_converts_to_the_nearest_whole_number_of_samples() {
+    assert_eq!(ms_to_samples(50.0, 48_000.0), 2_400);
+    assert_eq!(ms_to_samples(1.0, 44_100.0), 44);
+    assert_eq!(ms_to_samples(-1.0, 48_000.0), 0);
+}
+
+#[test]
+fn a_value_rounds_down_to_a_whole_count() {
+    assert_eq!(floor_to_count(2.9), 2);
+    assert_eq!(floor_to_count(3.0), 3);
+    assert_eq!(floor_to_count(-1.5), 0);
+    assert_eq!(floor_to_count(f64::NAN), 0);
+    assert_eq!(floor_to_count(f64::INFINITY), usize::MAX);
 }
