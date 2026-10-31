@@ -241,6 +241,8 @@ fn run_text(dir: &Path, program: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn args(args: &[&str]) -> Vec<String> {
@@ -254,6 +256,63 @@ mod tests {
         assert_eq!(profile(&args(&["-r"])), "release");
         assert_eq!(profile(&args(&["--profile", "bench"])), "bench");
         assert_eq!(profile(&args(&["--profile=bench"])), "bench");
+    }
+
+    #[test]
+    fn a_commands_output_is_its_trimmed_standard_output_if_it_succeeds() {
+        let here = Path::new(".");
+
+        assert_eq!(
+            run_text(here, "sh", &["-c", "echo ' hi '"]),
+            Some("hi".to_owned())
+        );
+        assert_eq!(run_text(here, "sh", &["-c", "echo hi; exit 1"]), None);
+        assert_eq!(run_text(here, "no-such-program", &[]), None);
+    }
+
+    #[test]
+    fn the_commands_directory_is_the_one_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("marker"), "").unwrap();
+
+        assert_eq!(run_text(dir.path(), "ls", &[]), Some("marker".to_owned()));
+    }
+
+    #[test]
+    fn the_host_target_is_rustcs() {
+        let host = host_target();
+
+        assert!(host.split('-').count() >= 3, "{host}");
+    }
+
+    #[test]
+    fn the_commit_is_marked_dirty_only_with_uncommitted_changes_to_tracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(commit(root), "unknown");
+
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"]);
+        fs::write(root.join("tracked"), "one").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "-m", "first"]);
+        let clean = run_text(root, "git", &["rev-parse", "--short", "HEAD"]).unwrap();
+        assert_eq!(commit(root), clean);
+
+        fs::write(root.join("untracked"), "").unwrap();
+        assert_eq!(commit(root), clean);
+
+        fs::write(root.join("tracked"), "two").unwrap();
+        assert_eq!(commit(root), format!("{clean}-dirty"));
     }
 
     #[test]

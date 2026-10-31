@@ -68,3 +68,40 @@ pub fn font(size: f32, weight: Weight) -> FontId {
     };
     FontId::new(size, family)
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::{Align2, Color32, pos2};
+
+    use super::*;
+
+    #[test]
+    fn once_installed_both_weights_can_be_drawn_at_their_size() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+
+        let mut heights = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for weight in [Weight::Regular, Weight::SemiBold] {
+                let id = font(20.0, weight);
+                assert!((id.size - 20.0).abs() < f32::EPSILON);
+                let text = ui.painter().text(
+                    pos2(0.0, 0.0),
+                    Align2::LEFT_TOP,
+                    "Width",
+                    id,
+                    Color32::WHITE,
+                );
+                heights.push(text.height());
+            }
+        });
+        output.textures_delta.clear();
+
+        assert!(heights.iter().all(|&height| height > 10.0), "{heights:?}");
+    }
+
+    #[test]
+    fn the_two_weights_are_different_faces() {
+        assert_ne!(font(13.0, Weight::Regular), font(13.0, Weight::SemiBold));
+    }
+}

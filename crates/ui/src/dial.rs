@@ -408,46 +408,27 @@ impl<'a, P: Param> Dial<'a, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nice_plug::context::gui::GuiContextInner;
-    use nice_plug::params::internals::ParamPtr;
-    use nice_plug::prelude::{FloatParam, FloatRange, PluginApi, PluginState};
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use nice_plug::prelude::{FloatParam, FloatRange};
 
-    #[derive(Default)]
-    struct Host {
-        requests: Mutex<Vec<f32>>,
-        gestures: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl GuiContextInner for Host {
-        fn plugin_api(&self) -> PluginApi {
-            PluginApi::Clap
-        }
-        unsafe fn raw_begin_set_parameter(&self, _: ParamPtr) {
-            self.gestures.lock().expect("gestures").push("begin");
-        }
-        unsafe fn raw_set_parameter_normalized(&self, _: ParamPtr, value: f32) {
-            self.requests.lock().expect("requests").push(value);
-        }
-        unsafe fn raw_end_set_parameter(&self, _: ParamPtr) {
-            self.gestures.lock().expect("gestures").push("end");
-        }
-        fn get_state(&self) -> PluginState {
-            PluginState {
-                version: String::new(),
-                params: BTreeMap::new(),
-                fields: BTreeMap::new(),
-            }
-        }
-        fn set_state(&self, _: PluginState) {}
-        fn request_restart(&self) {}
-    }
+    use crate::fake_host::Host;
 
     /// Runs the real widget with a host-controlled parameter, and returns the painted dot's x
     /// coordinate. Fresh parameters keep the fake host independent of nice-plug's unsafe setters;
     /// the widget's state persists under its stable name, just as it does in an editor.
     fn frame(ctx: &egui::Context, host: &Host, time: f64, value: f32, events: Vec<Event>) -> f32 {
+        let output = run(ctx, host, time, value, events);
+        let (min, max) = extent_of(&output, DOT);
+        min.midpoint(max)
+    }
+
+    /// One frame of the dial in [`RECT`], `THICKNESS` thick, with its parameter at `value`.
+    fn run(
+        ctx: &egui::Context,
+        host: &Host,
+        time: f64,
+        value: f32,
+        events: Vec<Event>,
+    ) -> egui::FullOutput {
         let param = FloatParam::new("Width", value, FloatRange::Linear { min: 0.0, max: 1.0 });
         let setter = ParamSetter { raw_context: host };
         let mut output = ctx.run_ui(
@@ -465,20 +446,28 @@ mod tests {
                         signal: egui::Color32::GREEN,
                         lit: egui::Color32::GREEN,
                     },
-                    4.0,
+                    THICKNESS,
                 )
                 .on_close({
                     let gestures = host.gestures.clone();
                     move || gestures.lock().expect("gestures").push("end")
                 })
-                .show(
-                    ui,
-                    Rect::from_min_max(egui::pos2(20.0, 20.0), egui::pos2(180.0, 180.0)),
-                );
+                .show(ui, RECT);
             },
         );
         output.textures_delta.clear();
-        let (min, max) = output
+        output
+    }
+
+    const THICKNESS: f32 = 4.0;
+    const RECT: Rect = Rect {
+        min: egui::pos2(20.0, 20.0),
+        max: egui::pos2(180.0, 180.0),
+    };
+
+    /// The vertices painted fully in `colour`.
+    fn painted(output: &egui::FullOutput, colour: egui::Color32) -> Vec<egui::Pos2> {
+        output
             .shapes
             .iter()
             .filter_map(|shape| match &shape.shape {
@@ -486,16 +475,23 @@ mod tests {
                 _ => None,
             })
             .flatten()
-            .filter(|v| v.color == DOT)
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), v| {
-                (min.min(v.pos.x), max.max(v.pos.x))
-            });
-        assert!(
-            min.is_finite() && max.is_finite(),
-            "the dial painted its dot"
-        );
-        min.midpoint(max)
+            .filter(|v| v.color == colour)
+            .map(|v| v.pos)
+            .collect()
     }
+
+    /// The left and right ends of what's painted fully in `colour`.
+    fn extent_of(output: &egui::FullOutput, colour: egui::Color32) -> (f32, f32) {
+        let (min, max) = painted(output, colour)
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), pos| {
+                (min.min(pos.x), max.max(pos.x))
+            });
+        assert!(min.is_finite() && max.is_finite(), "nothing in {colour:?}");
+        (min, max)
+    }
+
+    const GREEN: egui::Color32 = egui::Color32::GREEN;
 
     fn wheel() -> Vec<Event> {
         vec![
@@ -507,6 +503,177 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    fn scroll(at: egui::Pos2, unit: MouseWheelUnit, y: f32) -> Vec<Event> {
+        vec![
+            Event::PointerMoved(at),
+            Event::MouseWheel {
+                unit,
+                phase: egui::TouchPhase::Move,
+                delta: vec2(0.0, y),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn click_at(ctx: &egui::Context, host: &Host, time: f64, value: f32, at: egui::Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            ctx,
+            host,
+            time,
+            value,
+            vec![Event::PointerMoved(at), button(true)],
+        );
+        frame(ctx, host, time + 0.01, value, vec![button(false)]);
+    }
+
+    #[test]
+    fn the_wheel_only_moves_the_dial_under_the_pointer() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, 0.5, vec![]);
+
+        let outside = egui::pos2(5.0, 5.0);
+        frame(
+            &ctx,
+            &host,
+            0.01,
+            0.5,
+            scroll(outside, MouseWheelUnit::Line, 1.0),
+        );
+
+        assert!(host.requests.lock().expect("requests").is_empty());
+    }
+
+    #[test]
+    fn a_trackpads_smooth_scrolling_adds_up_to_notches() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        let over = egui::pos2(100.0, 100.0);
+        frame(&ctx, &host, 0.0, 0.5, vec![]);
+
+        let half_a_notch = POINTS_PER_NOTCH / 2.0;
+        frame(
+            &ctx,
+            &host,
+            0.01,
+            0.5,
+            scroll(over, MouseWheelUnit::Point, half_a_notch),
+        );
+        assert!(host.requests.lock().expect("requests").is_empty());
+        frame(
+            &ctx,
+            &host,
+            0.02,
+            0.5,
+            scroll(over, MouseWheelUnit::Point, half_a_notch),
+        );
+
+        let requests = host.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_close(requests[0], 0.55);
+    }
+
+    #[test]
+    fn double_clicking_resets_to_the_default_inside_one_gesture() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        let over = egui::pos2(100.0, 100.0);
+        frame(&ctx, &host, 0.0, 0.5, vec![]);
+
+        click_at(&ctx, &host, 0.01, 0.5, over);
+        click_at(&ctx, &host, 0.05, 0.5, over);
+
+        let requests = host.requests.lock().expect("requests").clone();
+        assert_eq!(requests.len(), 1);
+        assert_close(requests[0], 0.5);
+        assert_eq!(*host.gestures.lock().expect("gestures"), ["begin", "end"]);
+    }
+
+    #[test]
+    fn a_wheel_gesture_gets_a_frame_when_it_is_due_to_end() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        frame(&ctx, &host, 9.0, 0.5, vec![]);
+        frame(&ctx, &host, 9.5, 0.5, vec![]);
+        // A gesture already open, since a real notch has egui draw frames for its own smooth
+        // scrolling for longer than the gesture lasts.
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                Id::new(("family-ui dial", "Width")),
+                State {
+                    wheel_until: Some(10.16),
+                    ..State::default()
+                },
+            );
+        });
+
+        let output = run(&ctx, &host, 10.11, 0.5, vec![]);
+
+        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        // egui takes its predicted frame time off a requested delay.
+        let left = 10.16 - 10.11 - 1.0 / 60.0;
+        assert!((delay.as_secs_f64() - left).abs() < 0.01, "{delay:?}");
+    }
+
+    /// The nearest and furthest that `points` get from the dial's centre.
+    fn reach(points: &[egui::Pos2]) -> (f32, f32) {
+        points
+            .iter()
+            .map(|&pos| (pos - RECT.center()).length())
+            .fold((f32::INFINITY, 0.0), |(min, max), d| {
+                (min.min(d), max.max(d))
+            })
+    }
+
+    #[test]
+    fn the_track_fills_the_rect_and_its_edge_is_one_physical_pixel_soft_at_any_scale() {
+        for pixels_per_point in [1.0, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(pixels_per_point);
+            let host = Host::default();
+            frame(&ctx, &host, 0.0, 0.5, vec![]);
+            let output = run(&ctx, &host, 0.01, 0.5, vec![]);
+
+            let (inner, outer) = reach(&painted(&output, TRACK));
+
+            // Fully opaque up to half a physical pixel inside the stroke's edges.
+            let half_pixel = 0.5 / pixels_per_point;
+            let edge = RECT.width() / 2.0;
+            assert!((outer - (edge - half_pixel)).abs() < 1e-3, "{outer}");
+            assert!(
+                (inner - (edge - THICKNESS + half_pixel)).abs() < 1e-3,
+                "{inner}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arc_shows_only_above_the_minimum() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+        frame(&ctx, &host, 0.0, 0.0, vec![]);
+
+        assert_eq!(painted(&run(&ctx, &host, 1.0, 0.0, vec![]), GREEN), []);
+        assert_ne!(painted(&run(&ctx, &host, 2.0, 0.5, vec![]), GREEN), []);
+    }
+
+    #[test]
+    fn the_dot_is_narrower_than_the_arc_it_sits_on() {
+        let ctx = egui::Context::default();
+        let host = Host::default();
+
+        let (left, right) = extent_of(&run(&ctx, &host, 0.0, 0.5, vec![]), DOT);
+
+        let width = right - left;
+        assert!(width > THICKNESS / 3.0 && width < THICKNESS, "{width}");
     }
 
     #[test]

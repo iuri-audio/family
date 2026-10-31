@@ -111,6 +111,16 @@ mod tests {
     }
 
     #[test]
+    fn a_scale_restored_through_the_shared_form_reaches_the_editor() {
+        let scale = Arc::new(EditorScale::default());
+        let editors = Arc::clone(&scale);
+
+        PersistentField::set(&scale, Saved { scale_factor: 1.5 });
+
+        assert!((editors.get() - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn a_scale_is_saved_in_the_vizia_builds_form() {
         let scale = EditorScale::new(1.25);
 

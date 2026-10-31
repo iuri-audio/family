@@ -6,6 +6,7 @@
 //! runs inside that runtime's SDK, with the developer's own Rust toolchain, and a build that still
 //! needs a newer glibc is refused before it's installed.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -54,7 +55,12 @@ fn target_dir(root: &Path, cargo_args: &[String]) -> PathBuf {
 
 /// The plugin folders a Linux host scans in the user's home: `~/.vst3` and `~/.clap`.
 pub fn plugin_folders() -> Result<[PathBuf; 2]> {
-    let home = std::env::var_os("HOME")
+    folders_in_home(std::env::var_os("HOME"))
+}
+
+/// Those folders in `home`, the value of `HOME`.
+fn folders_in_home(home: Option<OsString>) -> Result<[PathBuf; 2]> {
+    let home = home
         .filter(|home| !home.is_empty())
         .context("HOME is not set")?;
     let home = PathBuf::from(home);
@@ -73,7 +79,14 @@ fn check_glibc(library: &Path) -> Result<()> {
         "objdump could not read {}",
         library.display()
     );
-    let needed = newest_glibc(&String::from_utf8_lossy(&output.stdout));
+    refuse_newer_glibc(
+        library,
+        newest_glibc(&String::from_utf8_lossy(&output.stdout)),
+    )
+}
+
+/// Fails if `needed`, the glibc the library at `library` needs, is newer than the runtime's.
+fn refuse_newer_glibc(library: &Path, needed: Option<(u32, u32)>) -> Result<()> {
     if let Some(needed) = needed
         && needed > RUNTIME_GLIBC
     {
@@ -144,6 +157,35 @@ mod tests {
     #[test]
     fn a_library_without_glibc_symbols_needs_none() {
         assert_eq!(newest_glibc("no versions here"), None);
+    }
+
+    #[test]
+    fn a_build_may_need_the_runtimes_glibc_but_nothing_newer() {
+        let library = Path::new("Fake.clap");
+        let (major, minor) = RUNTIME_GLIBC;
+
+        refuse_newer_glibc(library, None).unwrap();
+        refuse_newer_glibc(library, Some((major, minor - 1))).unwrap();
+        refuse_newer_glibc(library, Some(RUNTIME_GLIBC)).unwrap();
+        let error = refuse_newer_glibc(library, Some((major, minor + 1))).unwrap_err();
+        assert!(error.to_string().contains("needs glibc"), "{error}");
+    }
+
+    #[test]
+    fn a_library_that_cant_be_read_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+
+        check_glibc(&dir.path().join("missing.clap")).unwrap_err();
+    }
+
+    #[test]
+    fn the_plugin_folders_are_in_home_which_must_be_set() {
+        assert_eq!(
+            folders_in_home(Some("/home/me".into())).unwrap(),
+            [PathBuf::from("/home/me/.vst3"), "/home/me/.clap".into()]
+        );
+        folders_in_home(None).unwrap_err();
+        folders_in_home(Some(OsString::new())).unwrap_err();
     }
 
     #[test]

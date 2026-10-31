@@ -18,6 +18,9 @@ pub mod scale;
 pub mod switch;
 pub mod text;
 
+#[cfg(test)]
+mod fake_host;
+
 use egui::Color32;
 
 pub use canvas::Canvas;
